@@ -33,6 +33,10 @@ $$
 2. \$$ P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} $$
 3. \$$ f(x) = f(a) + f'(a)(x - a) + \frac{f''(a)}{2!}(x - a)^2 + \cdots $$
 
+$$
+P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} 
+$$
+
 # 图片
 ![山田凉](/assets/img/bg-img.png)
 _试试凉_
