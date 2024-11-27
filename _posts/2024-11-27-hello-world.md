@@ -29,10 +29,6 @@ $$
 
 欧拉公式是 $$ e^{i\pi} + 1 = 0 $$
 
-1. \$$ n! \approx n^n e^{-n} \sqrt{2\pi n} $$
-2. \$$ P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} $$
-3. \$$ f(x) = f(a) + f'(a)(x - a) + \frac{f''(a)}{2!}(x - a)^2 + \cdots $$
-
 $$
 P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} 
 $$
