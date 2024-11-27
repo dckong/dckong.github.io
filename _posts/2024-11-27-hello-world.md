@@ -3,9 +3,9 @@ title: Hello World
 date: 2024-11-27 22:16 +0800
 categories: [其他]
 math: true
----
 
-悄悄测试一下功能☺️
+description: 悄悄测试一下功能☺️
+---
 
 # 代码
 
@@ -25,10 +25,14 @@ $$
 \end{equation}
 $$
 
-引用一下 \eqref{eq: eq1}
+引用一下 \eqref{eq:eq1}
 
 欧拉公式是 $$ e^{i\pi} + 1 = 0 $$
 
 1. \$$ n! \approx n^n e^{-n} \sqrt{2\pi n} $$
-2. \$$ cP(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} $$
+2. \$$ P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} $$
 3. \$$ f(x) = f(a) + f'(a)(x - a) + \frac{f''(a)}{2!}(x - a)^2 + \cdots $$
+
+# 图片
+![山田凉](/assets/img/bg-img)
+_试试凉_
