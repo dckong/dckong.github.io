@@ -1,6 +1,6 @@
 ---
 title: Hello World
-date: YYYY-MM-DD HH:MM:SS +0800
+date: 2024-11-27 22:16 +0800
 categories: [其他]
 math: true
 ---
