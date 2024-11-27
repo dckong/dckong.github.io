@@ -34,5 +34,5 @@ $$
 3. \$$ f(x) = f(a) + f'(a)(x - a) + \frac{f''(a)}{2!}(x - a)^2 + \cdots $$
 
 # 图片
-![山田凉](/assets/img/bg-img)
+![山田凉](../assets/img/bg-img)
 _试试凉_
