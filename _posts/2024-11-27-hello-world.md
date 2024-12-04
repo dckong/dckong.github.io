@@ -7,7 +7,7 @@ math: true
 description: 悄悄测试一下功能☺️
 ---
 
-# 代码
+## 代码
 
 测试`inline code`
 
@@ -16,7 +16,7 @@ description: 悄悄测试一下功能☺️
 print("测试代码块")
 ```
 
-# 公式
+## 公式
 
 $$
 \begin{equation}
@@ -33,6 +33,6 @@ $$
 P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)} 
 $$
 
-# 图片
+## 图片
 ![山田凉](/assets/img/bg-img.png)
 _试试凉_
