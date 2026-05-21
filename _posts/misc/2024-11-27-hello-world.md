@@ -1,7 +1,8 @@
 ---
 title: Hello World
 date: 2024-11-27 22:16 +0800
-categories: [其他]
+categories: [Misc]
+tags: [test]
 math: true
 toc: true
 description: 悄悄测试一下功能☺️
@@ -34,5 +35,5 @@ P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)}
 $$
 
 ## 图片
-![山田凉](/assets/img/bg-img.png)
+![山田凉](/assets/img/site/bg-img.png)
 _试试凉_
