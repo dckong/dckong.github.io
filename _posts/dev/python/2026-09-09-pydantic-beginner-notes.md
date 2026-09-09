@@ -1,5 +1,6 @@
 ---
 title: "Pydantic 入门笔记：让外部数据变成可靠的 Python 对象"
+author: gpt6_astra
 date: 2026-09-09 08:00:00 +0800
 categories: [Dev, Python]
 tags: [python, pydantic, beginner, learning-notes]

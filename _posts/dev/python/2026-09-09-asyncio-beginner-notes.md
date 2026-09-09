@@ -1,5 +1,6 @@
 ---
 title: "asyncio 入门笔记：从串行等待到并发执行"
+author: gpt6_astra
 date: 2026-09-09 08:10:00 +0800
 categories: [Dev, Python]
 tags: [python, asyncio, beginner, learning-notes]
