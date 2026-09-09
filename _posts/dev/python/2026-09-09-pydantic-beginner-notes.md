@@ -24,29 +24,6 @@ toc: true
 
 原文中的基础模型、Field、两类验证器、`validate_call`、`BaseSettings` 和 `SettingsConfigDict` 均有对应章节。嵌套书架、批量导入和边界练习是本笔记增加的实践内容。没有标注“接着运行”的代码块都应按文字说明单独保存；不要把不同版本的同名类全部粘在一个文件里。
 
-### 关键术语中英对照
-
-| 中文 | 英文 / 代码名称 | 先记住的含义 |
-| --- | --- | --- |
-| 类型提示 / 类型注解 | type hint / type annotation | 声明预期类型，普通 Python 不会仅凭它自动验证 |
-| 数据验证 / 数据校验 | data validation | 检查输入是否满足所声明的规则 |
-| 解析 | parsing | 把输入解释成可使用的结构或值 |
-| 类型转换 | type coercion | 例如将 `"120"` 转换为整数 120 |
-| 模型 / 模型实例 | model / model instance | 数据规则的定义 / 按规则建立的一条记录 |
-| 字段 / 约束 | field / constraint | 一项数据 / 它必须满足的条件 |
-| 默认值 / 默认工厂 | default value / default factory | 省略输入时的值 / 产生默认值的函数 |
-| 必填 / 可空 | required / nullable | 不允许省略 / 允许显式传入 None |
-| 验证器 | validator | 实现自定义检查或规范化的函数 |
-| 字段 / 模型验证器 | field validator / model validator | 检查单项 / 检查整体关系 |
-| 别名 | alias | 外部输入输出使用的另一种字段名称 |
-| 序列化 | serialization | 将对象转换为可输出或传输的表示 |
-| JSON 模式 | JSON Schema | 描述数据结构与部分约束的规范；不是一条数据 |
-| 元数据 | metadata | 字段说明、文档示例等描述性信息 |
-| 严格模式 | strict mode | 更严格地限制隐式类型转换 |
-| 嵌套模型 | nested model | 一个模型的字段中包含另一个模型 |
-| 环境变量 | environment variable | 从进程环境读取的配置值 |
-| 配置来源优先级 | settings source priority | 多处提供同一配置时，决定哪个值生效 |
-
 ## 1. 先看问题：字典里有数据，不等于数据能用
 
 假设网页表单给你一条读书计划：
@@ -105,7 +82,7 @@ False
 ('pages',) greater_than
 ```
 
-逐步理解这个过程：继承 `BaseModel` 定义模型；`pages: int` 声明目标类型；`Field(gt=0)` 加上正数约束；`model_validate()` 接收字典并返回实例。默认模式允许一些转换，所以 `"120"` 能成为 `120`。`0` 虽然是整数，却不符合正数规则。
+模型中的每一项数据称为字段（field）。逐步理解这个过程：继承 `BaseModel` 定义模型；`pages: int` 声明目标类型；`Field(gt=0)` 加上正数约束（constraint）；`model_validate()` 接收字典并返回实例。默认模式允许一些类型转换（type coercion），所以 `"120"` 能成为 `120`。`0` 虽然是整数，却不符合正数规则。
 
 读取错误时先看 `loc`（哪个位置），再看 `type`（错误类别），需要解释时看 `msg`。不要依赖整段英文报错完全不变。模型基础和嵌套模型见 [官方 Models 文档](https://docs.pydantic.dev/latest/concepts/models/)。
 
@@ -129,7 +106,7 @@ class OptionalNote(BaseModel):
     note: str | None = None # 可以省略，省略时采用 None
 ```
 
-**“允许空值”和“允许省略”是两件事。** 在 Pydantic 2 中，`str | None` 本身不会提供默认值。字段约定见 [官方 Fields 文档](https://docs.pydantic.dev/latest/concepts/fields/)。
+**“允许空值”（nullable）和“允许省略”是两件事。** 在 Pydantic 2 中，`str | None` 本身不会提供默认值。字段约定见 [官方 Fields 文档](https://docs.pydantic.dev/latest/concepts/fields/)。
 
 ## 4. 用一个完整案例把规则串起来
 
@@ -203,9 +180,9 @@ Value error, 已读页数不能超过总页数
 
 `gt=0` 表示大于零，`ge=0` 表示大于等于零。`str_strip_whitespace=True` 先去掉字符串两端空白，所以标题 `"   "` 无法通过长度检查。`extra="forbid"` 能帮你发现拼错的字段名，例如 `page`；默认情况下额外字段会被忽略。
 
-`field_validator` 处理一个字段的自定义规则，这里拒绝占位书名。默认的 `after` 模式在字段类型校验后运行；返回值会成为字段值，因此别忘记 `return value`。`model_validator(mode="after")` 读取完成字段校验的实例，适合比较两项数据，并需要返回 `self`。详见 [官方 Validators 文档](https://docs.pydantic.dev/latest/concepts/validators/)。
+字段验证器（field validator）`field_validator` 处理一个字段的自定义规则，这里拒绝占位书名。默认的 `after` 模式在字段类型校验后运行；返回值会成为字段值，因此别忘记 `return value`。模型验证器（model validator）`model_validator(mode="after")` 读取完成字段校验的实例，适合比较两项数据，并需要返回 `self`。详见 [官方 Validators 文档](https://docs.pydantic.dev/latest/concepts/validators/)。
 
-### 默认工厂为什么不加括号
+### 默认工厂（default factory）为什么不加括号
 
 `default_factory=uuid4` 把函数交给模型，每次需要默认值时再调用。若写成 `plan_id: UUID = uuid4()`，调用会发生在类定义时，后续实例会复用这个默认 UUID。列表也用 `default_factory=list` 明确表示“每次创建新列表”。
 
@@ -321,9 +298,9 @@ date
 | 固定编号格式 | `Field(pattern=r"^BK-[0-9]{3}$")` | `BK-001`、`BK-1`、`xBK-001` |
 | 每次创建时产生默认值 | `Field(default_factory=...)` | 连续创建两个实例 |
 
-`gt` 是严格大于，`ge` 包含边界。正则表达式中的 `^` 与 `$` 用来明确匹配位置；不要把“包含这个片段”误当成“整个字符串都符合格式”。`title`、`description` 和 `examples` 等元数据主要给文档和 Schema 使用，填写了说明不等于实现了业务检查。
+`gt` 是严格大于，`ge` 包含边界。正则表达式中的 `^` 与 `$` 用来明确匹配位置；不要把“包含这个片段”误当成“整个字符串都符合格式”。`title`、`description` 和 `examples` 等元数据（metadata）主要给文档和 Schema 使用，填写了说明不等于实现了业务检查。
 
-### 7.2 别名让外部命名与内部命名各自清楚
+### 7.2 别名（alias）让外部命名与内部命名各自清楚
 
 假设一个旧接口的字段叫 `bookTitle`，你的 Python 代码想用 `title`。下面是独立的 `alias_demo.py`：
 
@@ -352,7 +329,7 @@ except ValidationError as error:
 
 如果确实需要同时接受两种命名，Pydantic 2.11+ 可设置 `ConfigDict(validate_by_name=True, validate_by_alias=True)`；较早的 v2 教程常见 `populate_by_name=True`。输入和输出想要不同别名时，可进一步了解 `validation_alias`、`serialization_alias`。版本细节见 [Alias 文档](https://docs.pydantic.dev/latest/concepts/alias/)。
 
-### 7.3 自动转换与严格模式：先决定数据入口要接受什么
+### 7.3 自动转换与严格模式（strict mode）：先决定数据入口要接受什么
 
 保存并运行 `strict_demo.py`：
 

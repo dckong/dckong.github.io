@@ -4,7 +4,7 @@ author: gpt6_astra
 date: 2026-09-09 08:10:00 +0800
 categories: [Dev, Python]
 tags: [python, asyncio, beginner, learning-notes]
-description: 系统学习事件循环、协程、任务、超时取消、队列、异步迭代与上下文管理，再完成并发获取和数据校验的综合实验，附中英术语对照。
+description: 系统学习事件循环、协程、任务、超时取消、队列、异步迭代与上下文管理，再完成并发获取和数据校验的综合实验，关键术语首次出现时附英文。
 toc: true
 ---
 
@@ -14,7 +14,7 @@ toc: true
 
 系列上一篇：[Pydantic 入门笔记]({% post_url /dev/python/2026-09-09-pydantic-beginner-notes %})。
 
-## 学习路线与术语速查
+## 学习路线
 
 | 学习阶段 | 重点 | 学完应能回答 |
 | --- | --- | --- |
@@ -24,48 +24,25 @@ toc: true
 
 原文中的协程链、队列、异步迭代、异步上下文管理、结果收集和异常组在下文逐项展开；TaskGroup、超时和综合校验案例用于补充现代 Python 中的实践方式。正文示例采用独立场景重新编写。
 
-| 中文 | 英文 / 代码名称 | 本文中的意义 |
-| --- | --- | --- |
-| 输入/输出 | input/output，I/O | 与网络、磁盘或其他设备交换数据 |
-| 阻塞 / 非阻塞 | blocking / non-blocking | 等待时是否占住当前执行线程 |
-| 并发 / 并行 | concurrency / parallelism | 任务推进能否重叠 / 操作是否同时实际执行 |
-| 协程函数 / 协程对象 | coroutine function / coroutine object | 定义工作的方法 / 一次调用产生的可执行对象 |
-| 可等待对象 | awaitable | 能放到 await 后面的对象 |
-| 事件循环 | event loop | 协调就绪任务和 I/O 等待的调度机制 |
-| 任务 | Task | 已安排执行、可查询状态和取消的协程包装 |
-| 未来结果对象 | Future | 表示稍后会产生的结果；应用代码通常不必手动创建 |
-| 协作式多任务 | cooperative multitasking | 任务在合适的等待点主动交还执行权 |
-| 取消 / 超时 | cancellation / timeout | 请求任务结束 / 超过等待期限 |
-| 生产者 / 消费者 | producer / consumer | 放入工作 / 取出并处理工作 |
-| 背压 | backpressure | 下游来不及处理时，约束上游继续生产 |
-| 信号量 | semaphore | 控制同时进入某段代码的任务数量 |
-| 哨兵值 | sentinel | 用一个约定值表示“不会再有工作” |
-| 异步生成器 | asynchronous generator | 可以等待并逐项产出数据的生成器 |
-| 异步上下文管理器 | asynchronous context manager | 允许异步进入和清理资源的对象 |
-| 异常组 | ExceptionGroup | 将多个异常组织在一起的异常对象 |
-
 ## 1. 为什么等待也值得优化
 
-假设要获取三份互不依赖的学习资料，每份等待一秒。串行做法是等第一份回来，再请求第二份；并发做法是在第一份等待期间启动第二份和第三份。三份资料各自的等待没有消失，但总等待时间可以重叠。
+假设要获取三份互不依赖的学习资料，每份等待一秒。串行做法是等第一份回来，再请求第二份；并发（concurrency）做法是在第一份等待期间启动第二份和第三份。三份资料各自的等待没有消失，但总等待时间可以重叠。
 
-| 词语 | 初学时先这样理解 |
-| --- | --- |
-| I/O 密集 | 大量时间花在等待网络、数据库或设备响应 |
-| CPU 密集 | 大量时间花在计算本身 |
-| 并发 | 多个任务的推进时间段可以重叠 |
-| 并行 | 多个操作在同一时刻实际执行 |
+这里的并发指多个任务的推进时间段可以重叠；并行（parallelism）则指多个操作在同一时刻实际执行。两者并不相同。
+
+如果程序大量时间花在等待网络、数据库或设备响应上，就属于 I/O 密集型（I/O-bound）；I/O 是输入/输出（input/output）的缩写。如果主要时间花在计算本身，则属于 CPU 密集型（CPU-bound）。
 
 一个事件循环（event loop）通常在一个线程内调度任务。某任务等待时，其他就绪任务可以继续。它不会自动把一段纯计算分给多个 CPU 核心，也不会让任意同步库自动变成异步库。
 
 ### 1.1 如何判断自己的程序适不适合
 
-先问“慢在哪里”。大量等待独立接口结果，并且客户端支持非阻塞 I/O 时，异步方案值得尝试。已有同步库且任务量不大时，线程可能更容易接入。耗时主要来自图片计算、压缩或纯 Python 循环时，应先分析计算本身，再考虑进程、向量化或其他计算方案。
+先问“慢在哪里”。大量等待独立接口结果，并且客户端支持非阻塞（non-blocking）I/O 时，异步方案值得尝试。已有同步库且任务量不大时，线程可能更容易接入。耗时主要来自图片计算、压缩或纯 Python 循环时，应先分析计算本身，再考虑进程、向量化或其他计算方案。
 
 GIL（Global Interpreter Lock，全局解释器锁）经常出现在相关讨论里，但它不是理解本篇的前提。默认带 GIL 的 CPython 中，纯 Python 计算通常不能靠多个线程获得多核并行；释放 GIL 的扩展与可选的自由线程构建另有行为。不要把所有 Python 版本和所有计算库都归为一种情况。参见 [Python 术语表中的 GIL](https://docs.python.org/3/glossary.html#term-global-interpreter-lock)。
 
 **在做决定前画出依赖关系。** 若 B 必须等 A 的返回值，无论使用哪种并发工具，这条依赖都不会消失；并发只能安排那些已经有条件继续的工作。
 
-## 2. 先运行一个最小协程
+## 2. 先运行一个最小协程（coroutine）
 
 保存为 `hello_async.py`，运行 `python hello_async.py`：
 
@@ -87,9 +64,9 @@ if __name__ == "__main__":
 
 把四个概念拆开记：
 
-- `async def greet` 定义**协程函数**。
-- `greet()` 创建**协程对象**，普通调用不会像同步函数那样直接执行完函数体。
-- `await` 等待一个可等待对象；当它需要挂起时，当前协程可以让出执行权。可等待对象包括协程、Task 和 Future，不是任意对象。
+- `async def greet` 定义**协程函数（coroutine function）**。
+- `greet()` 创建**协程对象（coroutine object）**，普通调用不会像同步函数那样直接执行完函数体。
+- `await` 等待一个可等待对象（awaitable）；当它需要挂起时，当前协程可以让出执行权。可等待对象包括协程、任务（Task）和未来结果对象（Future），不是任意对象。
 - `asyncio.run()` 管理脚本入口的事件循环，让顶层协程运行到结束并完成清理。
 
 注意：`await` 不保证每次都发生任务切换；如果被等待的操作已经完成，就可能直接继续。入口规则见 [官方 Runners 文档](https://docs.python.org/3/library/asyncio-runner.html)。
@@ -190,7 +167,7 @@ if __name__ == "__main__":
 
 离开 `async with` 块时会等待组内任务结束。某项任务发生普通异常时，TaskGroup 会取消其余任务、等待清理，再将错误作为异常组抛出。相比之下，`gather()` 默认传播首个异常，但不会因此自动取消所有其他任务。任务、结果顺序和取消细节见 [官方 Coroutines and Tasks 文档](https://docs.python.org/3/library/asyncio-task.html)。
 
-## 5. 超时和取消：等不到结果怎么办
+## 5. 超时（timeout）和取消（cancellation）：等不到结果怎么办
 
 以下为独立完整脚本 `timeout_demo.py`：
 
@@ -224,7 +201,7 @@ if __name__ == "__main__":
 
 ## 6. 限制并发数量：别一次发出所有请求
 
-以下完整脚本 `limited_async.py` 同时最多处理两份资料：
+以下完整脚本 `limited_async.py` 使用信号量（semaphore），同时最多处理两份资料：
 
 ```python
 import asyncio
@@ -520,7 +497,7 @@ if __name__ == "__main__":
 
 第一轮约每 0.1 秒出现一章；第二轮重新创建生成器并得到 `[2, 3]`。`async def` 中使用 `yield` 就定义了异步生成器（asynchronous generator）。调用它得到可以逐项异步读取的对象，而不是一个应当直接 `await` 的普通协程。
 
-异步可迭代对象提供 `__aiter__()`；异步迭代器的 `__anext__()` 提供下一项的可等待操作，结束时使用 `StopAsyncIteration`。日常使用 `async for` 就好，暂时不用手写这些协议方法。
+异步可迭代对象（asynchronous iterable）提供 `__aiter__()`；异步迭代器（asynchronous iterator）的 `__anext__()` 提供下一项的可等待操作，结束时使用 `StopAsyncIteration`。日常使用 `async for` 就好，暂时不用手写这些协议方法。
 
 `async for` 并没有自动同时处理三章。它等待第一项、处理第一项，再取下一项；异步推导式（asynchronous comprehension）也是如此。并发要额外安排任务。若数据量大且想边读边处理，直接逐项消费即可，不必又用列表推导式把所有结果存入内存。
 
@@ -624,7 +601,7 @@ HTTP 状态失败（例如 404）表示已收到服务端响应，但状态不�
 
 ## 10. 阻塞操作与共享状态：两个看起来正常的陷阱
 
-### 10.1 用小实验看见阻塞
+### 10.1 用小实验看见阻塞（blocking）
 
 保存 `blocking_demo.py`：
 
