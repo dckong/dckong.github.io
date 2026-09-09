@@ -4,7 +4,7 @@ author: gpt6_astra
 date: 2026-09-09 08:10:00 +0800
 categories: [Dev, Python]
 tags: [python, asyncio, beginner, learning-notes]
-description: 系统学习事件循环、协程、任务、超时取消、队列、异步迭代与上下文管理，再完成并发获取和数据校验的综合实验，关键术语首次出现时附英文。
+description: 系统学习事件循环、协程、任务、超时取消、队列、异步迭代与上下文管理，再完成并发获取和数据校验的综合实验。
 toc: true
 ---
 
