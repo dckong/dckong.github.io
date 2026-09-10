@@ -1,1321 +1,920 @@
 ---
-title: "asyncio 学习笔记：从一次等待到有序管理并发任务"
+title: "Python 的 asyncio：一次动手实践之旅（Real Python 译文）"
 author: gpt6_astra
 date: 2026-09-09 08:10:00 +0800
 last_modified_at: 2026-09-10
 categories: [Dev, Python]
-tags: [python, asyncio, beginner, learning-notes]
-description: asyncio 的协程、await、Task、事件循环、队列与异步协议，以及异常处理、超时取消和 HTTP 并发请求。包含执行时间线、代码示例和练习。
+tags: [python, asyncio, translation, realpython]
+description: "Real Python 教程《Python's asyncio: A Hands-On Walkthrough》的中文翻译，涵盖协程与 async/await、事件循环、协程链与队列、异步迭代器与 async with、任务调度与异常组，以及异步生态常用库。"
 toc: true
 ---
 
-asyncio 是 Python 标准库中的异步 I/O 框架。它使用协程和事件循环，让多个任务在等待网络响应等操作时交替推进。理解异步代码，需要区分任务的创建、执行、挂起和恢复：一个任务开始等待后，其他已经安排的任务才有机会利用这段时间继续工作。
+> **译文说明**：本文是 Real Python 教程 [Python's asyncio: A Hands-On Walkthrough](https://realpython.com/async-io-python/)（作者 Leodanis Pozo Ramos）的中文翻译，仅供个人学习使用，版权归原作者与 Real Python 所有。原文中的广告、推荐课程、测验推广与订阅引导已删除；代码块按原文示例重新排版，并修正了影响理解或示例结果的个别错误；并发关系图沿用原文配图。
+>
+> **运行说明**：示例已在 Python 3.13.13 下核对，网站请求使用 aiohttp 3.14.3。耗时、时钟、对象地址、随机任务日志和网站状态码均为示例，不保证每次相同。标有 `>>>` 的代码使用普通 Python REPL，只有“asyncio REPL”一节使用支持顶层 `await` 的交互环境。
 
-**运行环境：Python 3.11+。** `TaskGroup`、`asyncio.timeout()` 和 `except*` 需要 Python 3.11 或更新版本。HTTP 示例需要 aiohttp，数据校验示例需要 Pydantic。调度示例使用默认任务工厂，不启用 eager task factory。
+Python 的 `asyncio` 库让你可以用 `async` 和 `await` 关键字编写并发代码。Python 异步 I/O 的核心构件是可等待对象（awaitable object）——最常见的是协程（coroutine）——由事件循环（event loop）负责调度并异步执行。这套编程模型让你能在单个执行线程内高效地管理多个 I/O 密集型（I/O-bound）任务。
 
-完整脚本按标注的文件名分别保存；“替换”片段用于修改指定函数或定义。脚本不要命名为 `asyncio.py`，以免遮蔽标准库。`asyncio.sleep()` 用于模拟等待，示例耗时为近似值，实际时间和部分日志顺序会受调度影响。
+在本教程中，你将学习 Python `asyncio` 的工作方式、如何定义并运行协程，以及在对执行 I/O 密集型任务的应用中，何时该用异步编程来换取更好的性能。
 
-## 1. 从同步等待开始：程序究竟慢在哪里？
+**学完本教程，你将理解以下几点：**
 
-### 1.1 一份资料等待一秒，三份为什么要等三秒？
+* Python 的 **`asyncio`** 提供了一个框架，用**协程**、**事件循环**与**非阻塞 I/O 操作**来编写**单线程并发代码**。
+* 对 I/O 密集型任务而言，异步 I/O **往往能胜过多线程（multithreading）**——尤其在需要管理大量并发任务时——因为它省去了线程管理的开销。
+* 当你的应用把大量时间花在等待 **I/O 操作**上（例如网络请求或文件访问），而你又希望**在不额外创建线程或进程的前提下并发运行许多这类任务**时，就应该使用 `asyncio`。
 
-先不用任何异步语法。完整脚本 `prepare_sync.py`：
+通过一系列动手示例，你将获得用 `asyncio` 编写高效 Python 代码的实用技能，让程序在 I/O 需求不断增长时依然能优雅地扩展。
+
+## 初步认识异步 I/O（A First Look at Async I/O）
+
+在深入 `asyncio` 之前，值得先花点时间把异步 I/O 与其他并发模型做个对比，看看它在 Python 那幅广阔、有时甚至令人眼花缭乱的图景中处于什么位置。先来看几个基础概念：
+
+* **并行（parallelism）** 指同时执行多个操作。
+* **多进程（multiprocessing）** 是一种实现并行的手段，它把任务分散到计算机的各个 CPU 核心上。多进程非常适合 CPU 密集型（CPU-bound）任务，例如紧密的 [`for` 循环](https://realpython.com/python-for-loop/)和数学计算。
+* **并发（concurrency）** 是一个比并行稍宽泛的说法，指多个任务具备以重叠方式运行的能力。并发并不必然意味着并行。
+* **线程（threading）** 是一种并发执行模型，多个线程轮流执行任务。一个进程可以包含多个线程。由于[全局解释器锁（GIL）](https://realpython.com/python-gil/)，Python 与线程的关系有些复杂，不过这超出了本教程的范围。
+
+线程适合处理[**I/O 密集型任务**](https://realpython.com/ref/glossary/io-bound-task/)。I/O 密集型任务的绝大部分时间都耗在等待[**输入/输出（I/O）**](https://realpython.com/ref/glossary/input-output/)完成上；而 [CPU 密集型任务](https://realpython.com/ref/glossary/cpu-bound-task/)的特征则是 CPU 核心从开始到结束一直满负荷运转。
+
+Python [标准库](https://realpython.com/ref/glossary/standard-library/)长期以来通过 `multiprocessing`、`concurrent.futures` 和 `threading` 包[支持上述这些模型](https://docs.python.org/3/library/concurrency.html)。
+
+现在该往这个组合里加入一位新成员了。近年来，另一种模型被更完整地构建进了 [CPython](https://realpython.com/cpython-source-code-guide/)：**异步 I/O**，通常简称 **async I/O**。该模型由标准库中的 [**`asyncio`**](https://realpython.com/ref/stdlib/asyncio/) 包以及 [`async`](https://realpython.com/python-keywords/#the-async-keyword) 与 [`await`](https://realpython.com/python-keywords/#the-await-keyword) 两个关键字共同提供。
+
+**注意：** 异步 I/O 并不是新概念。它在 [Go](https://gobyexample.com/goroutines)、[C#](https://docs.microsoft.com/en-us/dotnet/csharp/async) 和 [Rust](https://doc.rust-lang.org/book/ch17-00-async-await.html) 等语言中已经存在，或者正在被加入这些语言。
+
+Python 文档把 `asyncio` 包介绍为一个[编写并发代码的库](https://docs.python.org/3/library/asyncio.html)。不过，异步 I/O 既不是线程也不是多进程，它并不建立在这两者之上。
+
+异步 I/O 是一种单线程、单进程的技术，采用[协作式多任务（cooperative multitasking）](https://en.wikipedia.org/wiki/Cooperative_multitasking)。它在单进程单线程的前提下，让多个任务的执行过程交错推进。[协程](https://realpython.com/ref/glossary/coroutine/)——简称 **coro**——是异步 I/O 的核心特性，可以被并发地调度，但协程本身并不天然具备并发性。
+
+再强调一次：异步 I/O 是一种并发编程模型，但它不是并行。它与线程的关系比与多进程更近，但又与两者都不同，是并发生态中一个独立存在的成员。
+
+还剩一个术语没解释：说某个东西是**异步的（asynchronous）**，到底是什么意思？这里给不出严格定义，但就本教程而言，你可以把握两个关键性质：
+
+1. **异步例程**可以在等待结果的过程中*暂停*自己的执行，让其他例程趁机运行。
+2. **异步代码**通过协调各个异步例程，来促成任务的并发执行。
+
+下面这张示意图把上述内容串了起来。白色术语代表概念，绿色术语代表这些概念的具体实现方式：
+
+![并发包含并行：线程与异步 I/O 可以实现并发，多进程可以实现并行](/assets/img/posts/python/concurrency-parallelism-realpython.png){: width="504" height="411" }
+_并发与并行的关系。图片来源：[Real Python 原文](https://realpython.com/async-io-python/)。_
+
+图中的内圈表示并行，外圈表示更广义的并发：并行是并发的一种情形，但并发不一定是并行。本教程中的单线程 `asyncio` 可以并发推进多个任务，但不会同时执行这些任务的 Python 代码。
+
+如果你想彻底弄清线程、多进程与异步 I/O 之间的区别，不妨先停下来看看[《Speed Up Your Python Program With Concurrency》](https://realpython.com/python-concurrency/)这篇教程。眼下我们先聚焦异步 I/O。
+
+### 异步 I/O 到底怎么回事（Async I/O Explained）
+
+异步 I/O 乍看之下似乎反直觉、甚至自相矛盾：一个用于支撑并发代码的东西，怎么可能只用单个 CPU 核心上的单个线程？Miguel Grinberg 在 [PyCon](https://realpython.com/pycon-guide/) 上的演讲把这件事讲得非常漂亮：
+
+> 国际象棋大师朱迪特·波尔加（Judit Polgár）举办一场车轮战表演，她要同时与多位业余棋手对弈。她有两种组织表演的方式：*同步*方式与*异步*方式。
+>
+> 前提假设：
+>
+> * 24 位对手
+> * 朱迪特每走一步棋用 5 秒
+> * 每位对手每走一步用 55 秒
+> * 每盘棋平均 30 个回合（双方合计 60 步）
+>
+> **同步版本**：朱迪特一盘一盘地下，绝不同时下两盘，直到一盘结束。每盘棋耗时 *(55 + 5) \* 30 == 1800* 秒，也就是 30 分钟。整场表演耗时 *24 \* 30 == 720* 分钟，即 **12 小时**。
+>
+> **异步版本**：朱迪特在各张棋桌之间走动，每到一桌走一步。她离开棋桌，让对手在等待期间思考下一步。在全部 24 盘棋上各走一步，朱迪特需要 *24 \* 5 == 120* 秒，也就是 2 分钟。整场表演因此缩短到 *120 \* 30 == 3600* 秒，仅仅 **1 小时**。（[来源](https://youtu.be/iG6fr81xHKA?t=4m29s)）
+
+世界上只有一个朱迪特·波尔加，她一次只能走一步棋。而以异步方式表演，却把时间从 12 小时压缩到 1 小时。异步 I/O 就是把这一原理搬到了编程中：在异步 I/O 里，程序的事件循环——后面还会详细讲——运行着多个任务，让每个任务都能在最佳的时机轮流推进。
+
+异步 I/O 会接管那些耗时很长的[函数](https://realpython.com/defining-your-own-python-function/)——就像上面例子中的一整盘棋局——它们原本会阻塞程序的执行（也就是朱迪特的时间），并以某种方式管理它们，好让其他函数能在这段空档里运行。在棋类的例子里，朱迪特就是在对手思考落子的时候去和其他参与者对弈。
+
+### 异步 I/O 并不简单（Async I/O Isn't Simple）
+
+编写经得起考验的多线程代码可能相当困难，而且容易出错。异步 I/O 回避了你在多线程设计中可能遇到的一些绊脚石。但这并不意味着[异步编程](https://realpython.com/ref/glossary/asynchronous-programming/)在 Python 里就是件轻松的事。
+
+要意识到，一旦你稍微深入表层之下，异步编程就会变得棘手。Python 的异步模型建立在回调（callback）、协程、事件（event）、传输（transport）、协议（protocol）以及[未来对象（future）](https://docs.python.org/3/library/asyncio-future.html#asyncio.Future)等概念之上——光是这些术语就足以让人望而生畏。
+
+话虽如此，Python 异步编程的生态已经大有改善。`asyncio` 包已经成熟，如今提供了一套稳定的 [API](https://realpython.com/ref/glossary/api/)。此外，它的文档也经过了大幅重写，关于这个主题还涌现出了一些高质量的参考资料。
+
+## 用 asyncio 编写 Python 异步 I/O（Async I/O in Python With `asyncio`）
+
+既然你已经对异步 I/O 这一并发模型有了一些背景认识，接下来就该探索 Python 的具体实现了。Python 的 `asyncio` 包与它相关的两个关键字 [`async`](https://realpython.com/python-keywords/#the-async-keyword) 和 [`await`](https://realpython.com/python-keywords/#the-await-keyword) 各有分工，但合在一起就能帮你声明、构建、执行并管理异步代码。
+
+### 协程与协程函数（Coroutines and Coroutine Functions）
+
+异步 I/O 的核心是[**协程**](https://realpython.com/ref/glossary/coroutine/)这一概念：它是一种可以暂停执行、稍后再恢复的对象。在暂停期间，它可以把控制权交给事件循环，由事件循环去执行另一个协程。协程对象由调用[**协程函数**](https://realpython.com/ref/glossary/coroutine-function/)（也叫**异步函数**）产生，而协程函数用 `async def` 结构来定义。
+
+在写下第一段异步代码之前，先看一个同步运行的例子：
+
+文件名：`countsync.py`
 
 ```python
 import time
 
 
-def prepare(name: str) -> str:
-    print("开始", name)
+def count():
+    print("One")
     time.sleep(1)
-    print("完成", name)
-    return f"{name}已就绪"
+    print("Two")
+    time.sleep(1)
+
+
+def main():
+    for _ in range(3):
+        count()
 
 
 if __name__ == "__main__":
     start = time.perf_counter()
-    results = [prepare(name) for name in ["笔记", "习题", "示例"]]
-    print(results)
-    print(f"总耗时约 {time.perf_counter() - start:.1f} 秒")
+    main()
+    elapsed = time.perf_counter() - start
+    print(f"{__file__} executed in {elapsed:0.2f} seconds.")
 ```
 
-顺序是：笔记开始、笔记完成、习题开始、习题完成、示例开始、示例完成。总耗时约三秒。
+`count()` 函数先[打印](https://realpython.com/python-print/) `One` 并等待一秒，再打印 `Two` 并再等一秒。[`main()`](https://realpython.com/python-main-function/) 函数里的循环会执行 `count()` 三次。而在 [`if __name__ == "__main__"`](https://realpython.com/if-name-main-python/) 条件块中，你在执行之初记录当前时间，调用 `main()`，算出总耗时并显示在屏幕上。
 
-`time.sleep(1)` 阻塞当前线程一秒，模拟同步调用迟迟没有返回。列表推导式必须等本轮函数返回，才会处理下一个名字。实际场景里，这一秒可能在等待远程服务器、数据库或其他外部系统。
+[运行这个脚本](https://realpython.com/run-python-scripts/)，你会得到如下输出：
 
-三份资料互相独立，等待笔记时就可以发起习题和示例的请求。每个请求仍需等待一秒，但三段等待可以重叠，从而缩短总耗时。
+```shell
+$ python countsync.py
+One
+Two
+One
+Two
+One
+Two
+countsync.py executed in 6.03 seconds.
+```
 
-### 1.2 并发、并行、线程与进程
+脚本交替打印 `One` 和 `Two`，每次打印之间间隔一秒。总共耗时略多于六秒。
 
-**并发**描述多件工作在重叠的时间段内推进；**并行**描述多个操作在同一时刻实际执行。单个线程可以让一项工作等待时推进另一项，因此能有并发，但不会因此同时执行多段 Python 指令。
+如果把这个脚本改成使用 Python 的异步 I/O 模型，大致会是下面这样：
 
-线程、进程、事件循环是组织执行的机制。线程可以让操作系统安排执行机会；多个进程可以利用多个 CPU 核心；asyncio 通常在一个线程内，通过协程的等待点协调任务。
-
-| 主要耗时 | 一个典型场景 | 首先要考虑什么 |
-| --- | --- | --- |
-| 等待外部响应，I/O 密集 | 请求很多独立接口 | 等待能否重叠，客户端是否支持异步 |
-| 大量计算，CPU 密集 | 压缩、图像变换、纯 Python 大循环 | 算法、向量化、进程或其他计算执行方式 |
-| 少量顺序工作 | 读取配置后处理一个文件 | 同步写法是否已经足够清楚 |
-
-默认带 GIL 的 CPython 与可选的自由线程构建有不同的线程执行条件；某些扩展也会释放 GIL。但无论哪种构建，**仅把一段 CPU 循环放进 `async def`，都不会自动把这一个事件循环里的协程分配到多个核心**。背景可查 [Python 术语表：GIL](https://docs.python.org/3/glossary.html#term-global-interpreter-lock)。
-
-### 1.3 非阻塞与异步，是怎样让等待重叠的？
-
-同步接口可能让当前线程停在调用里，直到结果可用。异步接口会和事件循环合作：先发起或等待操作，需要等待时挂起当前任务，让线程有机会执行其他就绪工作；结果可用后，再恢复后面的代码。
-
-这里“暂停”只针对等待中的任务。它不意味着整个 Python 程序都睡了，也不意味着另外启动了一条线程去运行同一个协程。
-
-同样不能把“这是 I/O”理解为“它自动支持异步”。普通文件 `open().read()`、同步 HTTP 客户端、某些数据库驱动，在 `async def` 里照样可能阻塞。第 10、11 节会分别处理旧同步函数和真正的异步 HTTP 客户端。
-
-## 2. 第一个协程：函数、对象和执行分开看
-
-### 2.1 定义并运行协程
-
-完整脚本 `hello_async.py`：
+文件名：`countasync.py`
 
 ```python
 import asyncio
 
 
-async def prepare(name: str) -> str:
-    print("开始", name)
+async def count():
+    print("One")
     await asyncio.sleep(1)
-    print("完成", name)
-    return f"{name}已就绪"
+    print("Two")
+    await asyncio.sleep(1)
+
+
+async def main():
+    await asyncio.gather(count(), count(), count())
 
 
 if __name__ == "__main__":
-    result = asyncio.run(prepare("笔记"))
-    print(result)
+    import time
+    start = time.perf_counter()
+    asyncio.run(main())
+    elapsed = time.perf_counter() - start
+    print(f"{__file__} executed in {elapsed:0.2f} seconds.")
 ```
 
-程序约一秒后完成。只有一项工作时，总耗时没有缩短；变化在于等待期间能够让出执行权。
+这里你用 `async` 关键字把 `count()` 变成了协程函数：它打印 `One`，等待一秒，再打印 `Two`，再等待一秒。你用 `await` 关键字来*等待* `asyncio.sleep()` 的执行。这会把控制权交还给程序的事件循环，相当于在说：*我要睡一秒，你趁这段时间去跑别的东西吧。*
 
-这段代码包含三个不同的操作：`async def prepare` 定义协程函数；`prepare("笔记")` 创建协程对象；`asyncio.run(...)` 在脚本入口建立运行环境并驱动顶层协程。
+`main()` 是另一个协程函数，它用 [`asyncio.gather()`](#其他-asyncio-工具other-asyncio-tools) 并发运行三个 `count()` 实例。你用 `asyncio.run()` 函数来启动[事件循环](#异步-io-事件循环the-async-io-event-loop)并执行 `main()`。
 
-`return` 结束协程执行并返回一个值。另一个协程调用 `result = await prepare("笔记")`，拿到的就是这个返回值。
+把这个版本与同步版本的性能做个对比：
 
-### 2.2 只调用协程函数，为什么没有打印“开始”？
-
-完整脚本 `coroutine_object.py`：
-
-```python
-import asyncio
-
-
-async def prepare():
-    print("进入协程体")
-    await asyncio.sleep(0.1)
-    return "完成"
-
-
-if __name__ == "__main__":
-    operation = prepare()
-    print("创建后的类型：", type(operation).__name__)
-    print("现在才驱动执行")
-    print(asyncio.run(operation))
+```shell
+$ python countasync.py
+One
+One
+One
+Two
+Two
+Two
+countasync.py executed in 2.00 seconds.
 ```
 
-输出：
+得益于异步 I/O 的思路，总执行时间从六秒多降到两秒出头，这正体现了 `asyncio` 处理 I/O 密集型任务的效率。
+
+想弄清异步版本*为什么*结束得更早，可以把两个版本放在同一条时间轴上，看看时间究竟花在哪里：
 
 ```text
-创建后的类型： coroutine
-现在才驱动执行
-进入协程体
-完成
+同步版本（countsync.py，总计约 6 秒）
+时间(秒)  0    1    2    3    4    5    6
+count#1   ├─One─┤─Two─┤
+count#2                  ├─One─┤─Two─┤
+count#3                                   ├─One─┤─Two─┤
+          └── 三次调用首尾相接，等待时间无法重叠 ──┘
+
+异步版本（countasync.py，总计约 2 秒）
+时间(秒)  0    1    2
+count#1   ├─One─┤─Two─┤
+count#2   ├─One─┤─Two─┤
+count#3   ├─One─┤─Two─┤
+          └── 三个协程的等待同时进行，只有睡眠时间被真正等待 ──┘
 ```
 
-创建对象与执行函数体不是同一步。调用协程函数得到的是一次待执行过程，它保存了要运行的代码和参数，等待运行环境驱动它。
+以上为示意框图，用于还原原文中交互式并发时间线图所表达的含义：三个协程都在同一时刻开始等待，因此总耗时约等于一条协程链中的两次一秒睡眠，也就是约两秒，而不是三条链依次执行所需的约六秒。
 
-如果创建后既不等待也不安排它，通常会看到 `RuntimeWarning: coroutine ... was never awaited`。这条警告不是说任务运行失败，而是说你创建了待执行过程，却没有让它正常参与执行。
+虽然 `time.sleep()` 和 `asyncio.sleep()` 看起来平平无奇，但它们在这里是耗时过程的替身，都涉及等待时间。对 `time.sleep()` 的调用可以代表一次耗时的阻塞式函数调用，而 `asyncio.sleep()` 则用来代表一次同样需要时间才能完成的[非阻塞调用](https://realpython.com/ref/glossary/non-blocking-operation/)。
 
-同一个已完成的原始协程对象不能拿来重复执行。想重新做一遍，需要重新调用函数，创建新对象。已经完成的 Task 则能保存结果并被重复等待，稍后会实验这个区别。忘记等待的排查见 [Developing with asyncio](https://docs.python.org/3.11/library/asyncio-dev.html)。
+正如你将在下一节看到的，等待某个对象（包括 `asyncio.sleep()`）的好处在于：当前函数可以暂时把控制权让给另一个更能立刻做事的函数。相比之下，`time.sleep()` 或任何其他阻塞调用都与异步 Python 代码不兼容，因为它会在整个睡眠期间让一切停滞。
 
-### 2.3 await 到底在等什么？
+### async 与 await 关键字（The `async` and `await` Keywords）
 
-`await expression` 要求表达式结果是可等待对象。应用中最常见的三种是协程对象、Task 和 Future。普通字符串、整数、同步函数返回的字典，都不是因为写了 `await` 就变得可以等待。
+到这里，该更正式地定义 `async`、`await` 以及它们帮你创建的那些协程函数了：
 
-比如 `await time.sleep(1)` 是错误写法：先调用同步 `time.sleep(1)`，线程已经被阻塞；它随后返回 `None`，再尝试等待 `None` 时又会出错。正确的定时异步等待是 `await asyncio.sleep(1)`。
+* **`async def`** 语法结构引入的是一个**协程函数**或一个[**异步生成器（asynchronous generator）**](https://realpython.com/ref/glossary/asynchronous-generator/)。
+* **`async with`** 与 **`async for`** 语法结构分别引入异步的 **`with` 语句**与异步的 **`for` 循环**。
+* **`await`** 关键字用于等待一个可等待对象。当被等待的操作需要挂起时，当前任务会让出执行权，事件循环便可运行其他就绪任务；如果结果能立即取得，就可能直接继续执行。
 
-`await` 也不是“到这里一定切到另一个任务”的命令。如果被等待的操作能立即完成，当前任务可能接着向下执行。只有执行过程实际挂起，其他就绪任务才有机会被这个事件循环调度。
+为了把最后一点说得更清楚：当 Python 在 `g()` 协程的作用域中遇到 `await f()` 表达式时，`g()` 会等待 `f()` 的结果。如果 `f()` 在等待过程中挂起，事件循环就有机会运行其他任务；如果 `f()` 能立即完成，则不一定发生任务切换。
 
-完整脚本 `immediate_await.py`：
+写成代码，最后一条大致如下：
+
+```python
+async def g():
+    result = await f()  # 暂停，等 f() 返回后再回到 g()
+    return result
+```
+
+围绕 `async` 和 `await` 的使用时机与方式，还有一套严格的规则。无论你是在熟悉语法，还是已经接触过 `async` 和 `await`，这些规则都很有帮助：
+
+* 用 `async def` 结构可以定义协程函数。它可以使用 `await`、`return` 或 `yield`，但这些都是可选的：
+
+  * 普通协程函数中可以使用 `await`、`return`，或者两者都用。要调用协程函数，你必须 `await` 它以取得结果，或者直接在事件循环中运行它。
+  * 在 `async def` 函数中使用 `yield` 会创建异步生成器。要遍历这个生成器，你可以使用 [`async for` 循环或推导式](#异步迭代器循环与推导式async-iterators-loops-and-comprehensions)。
+  * `async def` 中不能使用 `yield from`，否则会抛出 [`SyntaxError`](https://realpython.com/invalid-syntax-python/)。
+* 在普通 Python 脚本中，`await` 必须出现在 `async def` 函数体内，否则会抛出 `SyntaxError`。后文的 asyncio REPL 是支持顶层 `await` 的特殊交互环境。
+
+下面这几个简短示例概括了上述规则：
+
+```python
+async def f(x):
+    y = await z(x)  # 可以——协程中允许 `await` 和 `return`
+    return y
+
+
+async def g(x):
+    yield x  # 可以——这是一个异步生成器
+
+
+async def m(x):
+    yield from gen(x)  # 不行——会抛出 SyntaxError
+
+
+def n(x):
+    y = await z(x)  # 不行——会抛出 SyntaxError（这里没有 `async def`）
+    return y
+```
+
+最后，当你使用 `await f()` 时，要求 `f()` 是一个[**可等待对象（awaitable）**](https://realpython.com/ref/glossary/awaitable/)，也就是另一个协程，或者定义了 `.__await__()` [特殊方法](https://realpython.com/python-magic-methods/)并返回迭代器的对象。绝大多数情况下，你只需要关心协程。
+
+下面是一个更精细的例子，展示异步 I/O 如何压缩等待时间。假设你有一个名为 `makerandom()` 的协程函数，它不断产生 [0, 10] 范围内的随机整数，直到某个数超过阈值就返回。在下面的例子里，你把这个函数异步地运行三次。为了区分每次调用，你用不同颜色来标记：
+
+文件名：`rand.py`
 
 ```python
 import asyncio
+import random
 
-
-async def immediate():
-    return "立即可用"
-
-
-async def other():
-    print("另一个任务开始")
-
-
-async def main():
-    task = asyncio.create_task(other())
-    for index in range(3):
-        print(index, await immediate())
-    print("循环结束")
-    await task
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-使用默认任务工厂时，先打印三次“立即可用”和“循环结束”，再看到另一个任务开始。循环中虽然有三次 await，但 `immediate()` 没有真正挂起。
-
-`create_task()` 已经安排了 other 任务，但它直到 main 执行到 `await task` 时才得到运行机会。异步等待的语法定义见 [Python 表达式参考：Await expression](https://docs.python.org/3.11/reference/expressions.html#await-expression)。
-
-## 3. 从串行到并发：改变的是任务安排方式
-
-### 3.1 连续写三个 await，依旧可能一件接一件做
-
-完整脚本 `serial_and_concurrent.py`：
-
-```python
-import asyncio
-from time import perf_counter
-
-
-async def prepare(name: str, delay: float = 1) -> str:
-    print("开始", name)
-    await asyncio.sleep(delay)
-    print("完成", name)
-    return name
+COLORS = (
+    "\033[0m",   # 颜色结束
+    "\033[36m",  # 青色
+    "\033[91m",  # 红色
+    "\033[35m",  # 品红
+)
 
 
 async def main():
-    start = perf_counter()
-    serial = []
-    for name in ["笔记", "习题", "示例"]:
-        serial.append(await prepare(name))
-    print("串行结果：", serial)
-    print(f"串行耗时：{perf_counter() - start:.1f} 秒")
-
-    start = perf_counter()
-    concurrent = await asyncio.gather(
-        prepare("笔记"),
-        prepare("习题"),
-        prepare("示例"),
+    return await asyncio.gather(
+        makerandom(1, 9),
+        makerandom(2, 8),
+        makerandom(3, 8),
     )
-    print("并发结果：", concurrent)
-    print(f"并发耗时：{perf_counter() - start:.1f} 秒")
+
+
+async def makerandom(delay, threshold=6):
+    color = COLORS[delay]
+    print(f"{color}Initiated makerandom({delay}).")
+    while (number := random.randint(0, 10)) <= threshold:
+        print(f"{color}makerandom({delay}) == {number} too low; retrying.")
+        await asyncio.sleep(delay)
+    print(f"{color}---> Finished: makerandom({delay}) == {number} " + COLORS[0])
+    return number
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    random.seed(444)
+    r1, r2, r3 = asyncio.run(main())
+    print()
+    print(f"r1: {r1}, r2: {r2}, r3: {r3}")
 ```
 
-第一段约三秒，第二段约一秒。第一段等待本轮 prepare 返回后才进入下一轮，所以第二个协程对象甚至还没有创建。等待期间事件循环可以运行其他任务，但这段代码尚未安排下一份资料。
-
-第二段先构造三份协程，交给 `gather()` 一起调度，并等待这一组结果。每份任务仍然需要一秒，缩短的是整体中可重叠的等待时间。
+这段带颜色的输出胜过千言万语。下面用一张时间线示意还原原文中动画演示的执行过程（终端里每一行会以对应颜色显示）：
 
 ```text
-时间       0 秒             1 秒             2 秒             3 秒
-串行笔记   [等待-------------]
-串行习题                     [等待-------------]
-串行示例                                       [等待-------------]
+时间  →
+delay=1（青色）  Initiated makerandom(1). ── sleep 1 ── 重试 ── ... ──> 返回 10（超过阈值 9）
+delay=2（红色）  Initiated makerandom(2). ──── sleep 2 ──── 重试 ── ... ──> 返回 9 或 10（超过阈值 8）
+delay=3（品红）  Initiated makerandom(3). ────── sleep 3 ────── 重试 ── ... ──> 返回 9 或 10（超过阈值 8）
 
-并发笔记   [等待-------------]
-并发习题   [等待-------------]
-并发示例   [等待-------------]
+三个协程交替打印、交替睡眠：某个协程在 asyncio.sleep() 上等待时，
+事件循环立刻切去运行另一个已经就绪的协程，于是三份输出交错出现。
 ```
 
-对于互不依赖且资源充足的等待任务，串行时间接近各项时间之和，并发时间接近最长一项。它不是普遍性能公式：连接池、服务端限速、CPU 计算和调度成本都可能影响实际结果。
+以上为示意图，展示“三个协程交替推进、日志交错”的效果，不代表精确的完成顺序。本次运行的结果为 `r1: 10, r2: 10, r3: 9`；其中第一个协程的阈值为 9，所以生成 9 时仍会重试，只有 10 才满足返回条件。
 
-### 3.2 gather 的星号在做什么？
+这个程序定义了 `makerandom()` 协程，并用三个不同的输入并发运行它。大多数程序都由许多小而模块化的协程，外加一个负责[串联](#协程链coroutine-chaining)它们的包装函数组成。在 `main()` 中，你把这三种任务收集到一起。这三次对 `makerandom()` 的调用就是你的**任务池（pool of tasks）**。
 
-数量固定时可以逐项写参数，数量来自列表时通常写成：
+本例中生成随机数的部分是 CPU 密集型任务，但它带来的影响可以忽略不计。`asyncio.sleep()` 模拟的是一个 I/O 密集型任务，也恰好说明了：只有 I/O 密集型或非阻塞的任务，才能从异步 I/O 模型中获益。
+
+### 异步 I/O 事件循环（The Async I/O Event Loop）
+
+在异步编程中，事件循环就像一个[无限循环](https://realpython.com/python-while-loop/#intentional-infinite-loops)：它监视各个协程，收集关于谁处于空闲状态的反馈，并四处寻找这段时间里可以执行的东西。当某个空闲协程所等待的条件变为可用时，它能够把该协程唤醒。
+
+在现代 Python 中，启动事件循环的推荐做法是使用 [`asyncio.run()`](https://docs.python.org/3/library/asyncio-runner.html#asyncio.run)。这个函数负责创建事件循环、运行入口协程、清理剩余任务并关闭循环。当同一线程中已经有事件循环在运行时，你不能调用这个函数。
+
+你也可以用 [`get_running_loop()`](https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.get_running_loop) 函数拿到正在运行的事件循环实例：
 
 ```python
-# 在上一个脚本的 main 内，替换 concurrent 的赋值
-names = ["笔记", "习题", "示例"]
-concurrent = await asyncio.gather(*(prepare(name) for name in names))
+loop = asyncio.get_running_loop()
 ```
 
-生成器表达式逐个创建协程对象，星号 `*` 把它们展开成多个位置参数，等价于 `gather(coro1, coro2, coro3)`。`gather()` 接收的是多个可等待对象，不能把普通列表本身当成一项 awaitable 传进去。
+如果你需要在 Python 程序内部与事件循环交互，上面这种写法是个不错的选择。`loop` 对象支持用 `.is_running()` 和 `.is_closed()` 做自我检查。举例来说，当你想通过把事件循环作为参数传出去来[调度一个回调](https://docs.python.org/3/library/asyncio-eventloop.html#asyncio-example-lowlevel-helloworld)时，这就很有用。注意，如果当前没有正在运行的事件循环，`get_running_loop()` 会抛出 [`RuntimeError`](https://realpython.com/ref/builtin-exceptions/runtimeerror/) 异常。
 
-创建很多协程不意味着已经限制并发。这里有几项就会一起安排几项；数量很大时要再引入第 6 节的队列或第 10 节的信号量。
+更重要的是理解事件循环表层之下发生了什么。有几点值得强调：
 
-### 3.3 Task：把协程交给事件循环管理
+* 协程在被绑定到事件循环之前，自己几乎做不了什么。
+* 默认情况下，异步事件循环运行在单个线程、单个 CPU 核心上。在大多数 `asyncio` 应用中只会有一个事件循环，通常位于主线程。在不同线程中运行多个事件循环在技术上可行，但通常没有必要，也不推荐。
+* 事件循环是可插拔的。你可以编写自己的实现，让它像 `asyncio` 内置的事件循环一样运行任务。
 
-完整脚本 `task_lifecycle.py`：
+关于第一点：如果你有一个等待其他协程的协程，那么单独调用它几乎不会产生任何效果：
 
 ```python
-import asyncio
-from time import perf_counter
-
-
-async def prepare(name):
-    await asyncio.sleep(0.2)
-    return f"{name}已就绪"
-
-
-async def main():
-    start = perf_counter()
-    first = asyncio.create_task(prepare("笔记"), name="notes")
-    second = asyncio.create_task(prepare("习题"), name="exercises")
-    print("刚安排：", first.done(), second.done())
-    print(await first)
-    print(await second)
-    print("结束后：", first.done(), second.done())
-    print("再次等第一个：", await first)
-    print(f"耗时约 {perf_counter() - start:.1f} 秒")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> import asyncio
+>>> async def main():
+...     print("Hello...")
+...     await asyncio.sleep(1)
+...     print("World!")
+...
+>>> routine = main()
+>>> routine
+<coroutine object main at 0x0000000000000000>
 ```
 
-总耗时约 0.2 秒。虽然代码先 await first，再 await second，但两个任务**在等待之前都已安排**，因此可以在相同时间段推进。最后再次 await first 是读取已保存的结果，不会再次等待 0.2 秒。
-
-Task 管理一次协程执行的状态：尚未完成、正常结果、失败异常、被取消。`.done()` 只表示执行已经结束，不保证成功；`.result()` 在尚未完成时会报错，失败任务取结果时则会重新抛出它的异常。
-
-保留 Task 引用，并让所属流程负责等待或取消它。仅创建任务并立即结束 main，不是可靠的后台工作方式；`asyncio.run()` 收尾时会取消剩余任务。Task 的接口约定见 [Coroutines and Tasks](https://docs.python.org/3.11/library/asyncio-task.html)。
-
-## 4. 事件循环：把日志还原成一次调度过程
-
-### 4.1 三个任务等待时，谁在执行？
-
-对三项 `gather()` 实验，可以按以下顺序追踪：
-
-1. main 创建协程对象，gather 为它们安排执行。
-2. main 等待 gather 的整体结果，暂时挂起。
-3. 第一项打印“开始”，遇到尚未到期的定时等待后挂起。
-4. 第二项、第三项也运行到各自等待点。
-5. 此时如果没有其他就绪工作，事件循环等待定时器或 I/O 通知，而不需要用 Python 循环一直问“到了没有”。
-6. 定时等待完成后，任务变为可继续执行；恢复后打印“完成”并返回。
-7. 这一组都成功完成，gather 提供结果，main 从 await 后面继续。
-
-这是协作式调度。一个协程正在执行没有挂起点的普通代码时，同一事件循环中的其他任务不会随意抢进来执行一段 Python 代码。
-
-但这并不保证没有竞态：任务在 await 前读了一个共享值，await 后再写回时，另一个任务可能已经修改了它。第 10 节会用可复现的小实验说明。
-
-### 4.2 asyncio.run() 应放在哪里？
-
-脚本入口通常只需一次：
+在这个例子中，直接调用 `main()` 返回一个协程对象，你无法单独使用它。你需要用 `asyncio.run()` 把 `main()` 协程调度到事件循环上执行：
 
 ```python
-# 一个完整脚本的入口骨架
-import asyncio
-
-
-async def main():
-    loop = asyncio.get_running_loop()
-    print(loop.is_running())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> asyncio.run(routine)
+Hello...
+World!
 ```
 
-输出 True。`asyncio.run()` 管理事件循环的创建、顶层协程运行与结束清理。异步函数内部继续用 await 组合工作，不需要每层再建立一个事件循环。
+通常你会把自己的 `main()` 协程包在 `asyncio.run()` 调用里。而更低层的协程，可以用 `await` 来执行。
 
-不要在同一线程已经运行事件循环时嵌套调用 `asyncio.run()`。在支持顶层 await 的 Jupyter 等环境中，直接 `await main()`；普通交互终端可以用 `python -m asyncio` 启动专门的 asyncio REPL。交互环境支持顶层 await，不意味着普通 `.py` 文件也能把 await 随意写在顶层。见 [Runners](https://docs.python.org/3.11/library/asyncio-runner.html) 与 [asyncio REPL](https://docs.python.org/3.11/library/asyncio.html#asyncio-repl)。
+最后，事件循环*可插拔*这一点意味着：你可以使用任何一个可用的事件循环实现，这与你的协程结构无关。`asyncio` 包自带两种不同的[事件循环实现](https://docs.python.org/3/library/asyncio-eventloop.html#event-loop-implementations)。
 
-### 4.3 Future 为什么也会出现在文档里？
+默认使用哪种事件循环实现，取决于你的平台和 Python 版本。例如在 Unix 上默认通常是 [`SelectorEventLoop`](https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.SelectorEventLoop)，而 Windows 上则使用 [`ProactorEventLoop`](https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.ProactorEventLoop)，以获得更好的子进程与 I/O 支持。
 
-Future 表示一个将来才会确定的结果，可能最终成功，也可能失败或被取消。Task 继承了 Future 的大部分接口，并增加驱动协程执行的职责。
+第三方事件循环实现同样可用。例如 [uvloop](https://github.com/MagicStack/uvloop) 包提供了另一种实现，号称比 `asyncio` 自带的循环更快。
 
-把 Future 看成结果容器，把 Task 看成管理协程执行的对象，可以解释为什么二者都能 await，却不完全一样。底层网络库或回调接口需要把“稍后有结果”接入 await 时，Future 就有用。
+### asyncio REPL（The `asyncio` REPL）
 
-应用层通常使用 `create_task()`、`gather()` 或 TaskGroup 管理协程。Future 的 `set_result()` 等接口主要用于衔接底层回调。见 [官方 Futures](https://docs.python.org/3.11/library/asyncio-future.html)。
+从 [Python 3.8](https://realpython.com/python38-new-features/) 开始，`asyncio` 模块内置了一个专门的交互式 shell，称为 [asyncio REPL](https://docs.python.org/3/library/asyncio.html#asyncio-cli)。这个环境允许你直接在顶层使用 `await`，无需把代码包进 `asyncio.run()` 调用里。它非常适合用来试验、调试和学习 Python 中的 `asyncio`。
 
-## 5. 常见模式之一：协程链保留依赖，链之间并发
+要启动这个 [REPL](https://realpython.com/ref/glossary/repl/)，可以运行以下命令：
 
-### 5.1 步骤之间的依赖关系
+```shell
+$ python -m asyncio
+asyncio REPL 3.13.3 (main, Jun 25 2025, 17:27:59) [Clang 17.0.0 (clang-1700.0.13.3)] on darwin
+Use "await" directly instead of "asyncio.run()".
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import asyncio
+>>>
+```
 
-准备一门课程的学习资料需要两步：先拿到课程清单地址，再根据地址读取清单。第二步依赖第一步的返回值，不能因为使用 asyncio 就提前凭空知道地址。
+一旦出现 `>>>` 提示符，你就可以在里面运行异步代码了。看下面的例子，它复用了上一节的代码：
 
-但课程 A 的这两步与课程 B 的这两步可以重叠。可以将单门课程的完整过程写成一个协程，再并发执行多个课程的协程。
+适用于 Python 3.8+：
 
-完整脚本 `course_chain.py`：
+```python
+>>> import asyncio
+>>> async def main():
+...     print("Hello...")
+...     await asyncio.sleep(1)
+...     print("World!")
+...
+>>> await main()
+Hello...
+World!
+```
+
+这个例子的效果与上一节完全相同。区别在于，你不再用 `asyncio.run()` 运行 `main()`，而是直接使用 `await`。
+
+## 常见的异步 I/O 编程模式（Common Async I/O Programming Patterns）
+
+异步 I/O 有一套自己的可用编程模式，能帮你写出更好的异步代码。在实践中，你可以*把协程串联起来*，也可以使用协程的[队列](https://realpython.com/ref/glossary/queue/)。下面几节将介绍这两种模式的用法。
+
+### 协程链（Coroutine Chaining）
+
+协程的一个关键特性是你可以把它们*串联*起来。别忘了，协程是可等待对象，所以另一个协程可以用 `await` 关键字来等待它。这使得把程序拆分成更小、更易管理、可复用的协程变得更容易。
+
+下面的例子模拟了一个获取用户信息的两个步骤的过程：第一步获取用户信息，第二步获取该用户发布的文章：
+
+文件名：`chained.py`
 
 ```python
 import asyncio
-from time import perf_counter
-
-
-async def locate_manifest(course: str, delay: float) -> str:
-    await asyncio.sleep(delay)
-    return f"{course}/manifest.json"
-
-
-async def read_manifest(location: str, delay: float) -> list[str]:
-    await asyncio.sleep(delay)
-    return [f"{location}:笔记", f"{location}:习题"]
-
-
-async def prepare_course(course: str, locate_delay: float, read_delay: float):
-    start = perf_counter()
-    print("开始查找", course)
-    location = await locate_manifest(course, locate_delay)
-    print("拿到地址", course)
-    resources = await read_manifest(location, read_delay)
-    print(f"完成 {course}，本链约 {perf_counter() - start:.1f} 秒")
-    return course, resources
-
-
-async def main():
-    start = perf_counter()
-    results = await asyncio.gather(
-        prepare_course("A", 0.1, 0.4),
-        prepare_course("B", 0.3, 0.1),
-        prepare_course("C", 0.2, 0.2),
-    )
-    print("结果中的课程顺序：", [course for course, _ in results])
-    print(f"整体约 {perf_counter() - start:.1f} 秒")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-每条链的两段等待相加：A 约 0.5 秒，B 约 0.4 秒，C 约 0.4 秒。全部串行需要约 1.3 秒，并发三条链则接近最长链的 0.5 秒。
-
-B 与 C 的预计完成时间接近，不要依赖它们的打印先后。gather 的结果按输入顺序保持 A、B、C，这与完成日志顺序是两个问题。
-
-### 5.2 这里的 await 并没有“降低并发”
-
-常见误解是看到两行 await，就认为应该全部改成 gather。实际上，`location = await locate_manifest(...)` 明确写出了依赖；后一个函数没有 location 就不能执行。
-
-正确的并发边界是**多个独立课程之间**。沿着数据依赖写串行步骤，沿着独立输入安排并发，代码的因果关系才清楚。更复杂的流水线也先画依赖，再决定创建多少任务。
-
-如果任务总数事先可知、每项都有清楚的完整流程，协程链已经很好用。当工作持续产生、生产速度和处理速度不同，就需要另一种组织方式。
-
-## 6. 常见模式之二：用队列连接生产者与消费者
-
-### 6.1 为什么不能给每一条工作都立刻建一个任务？
-
-三条记录无所谓，但一次出现几十万条时，为每条创建一个等待中的任务也要占用内存。如果上游还在持续产生数据，下游又处理得较慢，就需要限制“正在处理多少”和“还允许积压多少”。
-
-生产者负责产生工作并放进队列；消费者从队列取一项，处理完再取下一项。固定消费者数量限制实际工作的并发规模，有界队列限制积压规模。生产者不必知道哪一个消费者接走了具体一项。
-
-### 6.2 入队、取出、完成与等待
-
-| 方法 | 含义 | 何时可能等待 |
-| --- | --- | --- |
-| `await queue.put(item)` | 放入一项工作 | 有界队列已满时 |
-| `await queue.get()` | 取出一项工作 | 队列为空时 |
-| `queue.task_done()` | 报告某次取出的工作已处理完 | 不需要 await |
-| `await queue.join()` | 等待未完成计数归零 | 仍有 put 对应的完成报告未收到时 |
-
-`get()` 只是取走，不表示完成处理。队列空了，也可能还有两位消费者正在处理刚取走的工作。因此 `queue.empty()` 与 `queue.join()` 不是替代关系。
-
-每一次成功取到的数据都需要按约定调用一次 `task_done()`；漏掉会让 join 等不到归零，多调用会报 `ValueError`。队列不会自动知道业务处理是否成功。见 [官方 Queues](https://docs.python.org/3.11/library/asyncio-queue.html)。
-
-### 6.3 一个能正常结束的完整队列程序
-
-先观察无预期业务失败的流程。完整脚本 `queue_workers.py`：
-
-```python
-import asyncio
-
-
-STOP = object()
-
-
-async def producer(queue, worker_count):
-    for index in range(6):
-        await queue.put(index)
-        print("放入", index, "当前排队", queue.qsize())
-    for _ in range(worker_count):
-        await queue.put(STOP)
-
-
-async def consumer(name, queue, results):
-    while True:
-        item = await queue.get()
-        try:
-            if item is STOP:
-                print(name, "退出")
-                return
-            print(name, "处理", item)
-            await asyncio.sleep(0.1)
-            results.append(item * 10)
-        finally:
-            queue.task_done()
-
-
-async def main():
-    queue = asyncio.Queue(maxsize=2)
-    results = []
-    worker_count = 2
-    workers = [
-        asyncio.create_task(consumer(f"worker-{i}", queue, results))
-        for i in range(worker_count)
-    ]
-    await producer(queue, worker_count)
-    await queue.join()
-    await asyncio.gather(*workers)
-    print("结果：", sorted(results))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-最终结果为 `[0, 10, 20, 30, 40, 50]`，两名消费者各自退出。哪名消费者处理某个编号不应作为业务保证。
-
-从头追踪一次：main 先安排消费者，再运行生产者；队列达到容量 2 时，后续 put 暂停，让消费者有机会取工作；消费者取出一项后等待处理；生产者看到队列有空位后继续。这里上游变慢，是因为下游速度和缓冲容量反过来约束了它，这叫**背压**。
-
-`maxsize=2` 限制的是排队项数，不包含已经被两名消费者取出的工作，所以系统中可以同时存在两项正在处理、两项等待处理。也不是总内存一定固定：本例 results 还在累积，输入若预先建成巨大列表也照样占内存。
-
-### 6.4 为什么有两个 STOP？为什么 STOP 也要 task_done？
-
-`STOP` 是结束标记，正常资料不会使用这个对象。每个消费者取到一个 STOP 后返回，因此两名消费者需要两个标记。只放一个，另一名就可能永久等待下一次 get。
-
-结束标记排在所有普通工作之后，表达“不会再有新工作”。若有多个生产者，应该先确认所有生产者完成，再由协调者统一发结束标记；不能任一生产者先结束就擅自让消费者退出。
-
-STOP 也是通过 put 放入队列的，所以同样增加未完成计数，必须对应 task_done。`finally` 保证正常处理、结束返回或处理异常离开时都执行这个报告；而 `get()` 放在 try 外，保证只有确实取到一项后才报告。
-
-最后的两次等待也各有职责：join 确认工作项的计数归零；gather 确认消费者任务本身已退出。不要以为 join 会自动取消还在等待的消费者。
-
-### 6.5 消费者中途失败时会发生什么？
-
-如果 queue_workers.py 中的消费者因未知异常退出，剩余工作可能无人处理，生产者或 join 就可能卡住。`finally: task_done()` 只报告当前项结束，不能复活已经退出的消费者。
-
-修复这个问题需要让一组任务共同受管理：某个消费者异常时取消其余相关工作，并把错误交给上层。第 8.7 节使用 TaskGroup 管理这组任务，在消费者失败时中断其余工作并报告异常。
-
-## 7. 其他异步语法：async for 与 async with
-
-### 7.1 async for 解决“下一项也需要等待”
-
-普通迭代器的下一项由 `__next__()` 提供；异步迭代器的 `__anext__()` 返回可等待对象，允许获取下一项时暂停。`async for` 负责反复等待下一项，直到异步迭代结束。
-
-常见场景是分页接口、数据库游标或流式消息：第一批到了就处理，不必等所有数据全部收齐。
-
-完整脚本 `async_pages.py`：
-
-```python
-import asyncio
-
-
-async def pages():
-    for page_number in range(1, 4):
-        await asyncio.sleep(0.1)
-        yield [f"第 {page_number} 页的资料 A", f"第 {page_number} 页的资料 B"]
-
-
-async def main():
-    async for page in pages():
-        print("收到", page)
-
-    first_items = [page[0] async for page in pages()]
-    print("每页第一项：", first_items)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-第一次循环约每 0.1 秒收到一页。第二次再次调用 `pages()` 创建新的异步生成器，重新获取三页，然后得到一个列表。
-
-`async def` 内出现 `yield` 时定义的是**异步生成器函数**，调用结果是异步生成器对象，消费方式是 async for；不能把它当成普通协程直接 `await pages()`。
-
-这里的异步推导式也按页逐次等待，**并没有同时发起三页获取**。async for 描述迭代协议，不负责自动创建并发任务。协议定义见 [Python 数据模型：Asynchronous Iterators](https://docs.python.org/3.11/reference/datamodel.html#asynchronous-iterators)。
-
-### 7.2 return、yield 与 await 的区别
-
-| 语法 | 控制流含义 | 示例 |
-| --- | --- | --- |
-| `return value` | 结束协程执行，交回最终结果 | prepare 返回资料名字 |
-| `await operation` | 取得可等待操作的结果，必要时挂起 | 等待资料准备完成 |
-| `yield value` | 产出一项，保存继续执行的位置 | 分页生成器产出一页 |
-
-异步生成器中可以用不带值的 `return` 结束，但不能用 `return value` 返回最终值。`yield from` 也不是异步生成器委托语法；转交另一个异步迭代器的数据时，用 async for 逐项 yield。
-
-yield 向消费者产出数据，await 等待另一个操作的结果，return 结束当前执行。异步生成器通过多次 yield 提供数据，普通协程则通过 return 提供最终结果。
-
-### 7.3 async with 解决“获取和释放资源也可能需要等待”
-
-普通 with 管理进入和离开时的资源处理，例如打开、关闭文件。async with 对应异步的进入与退出过程，底层方法是 `__aenter__()` 和 `__aexit__()`。
-
-先用独立小实验看见资源生命周期。完整脚本 `async_resource.py`：
-
-```python
-import asyncio
-from contextlib import asynccontextmanager
-
-
-@asynccontextmanager
-async def study_session():
-    print("开始连接")
-    await asyncio.sleep(0.1)
-    resource = {"connected": True}
-    print("连接完成")
-    try:
-        yield resource
-    finally:
-        print("开始释放")
-        await asyncio.sleep(0.1)
-        resource["connected"] = False
-        print("释放完成")
-
-
-async def main():
-    try:
-        async with study_session() as session:
-            print("使用资源：", session["connected"])
-            raise ValueError("模拟使用阶段失败")
-    except ValueError:
-        print("外层接到业务错误")
-    print("退出后：", session["connected"])
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-顺序为连接、使用、释放、外层接到错误，最后连接状态 False。中间出现异常，仍会执行 finally 中的退出工作，然后异常继续传给外层。
-
-`@asynccontextmanager` 把“yield 前准备、yield 处交给调用方、finally 里清理”的结构转换成可用于 async with 的上下文管理器。这里 yield 恰好一次，和上一节不断产出多页的异步生成器职责不同。见 [contextlib.asynccontextmanager](https://docs.python.org/3.11/library/contextlib.html#contextlib.asynccontextmanager)。
-
-async with 不会自动把同步函数变快，也不会自动并发执行它内部的语句。它的价值在于明确资源的拥有范围，并允许进入和退出阶段进行异步等待。
-
-## 8. 收集结果与处理异常
-
-### 8.1 按输入顺序收集，还是先完成的先处理？
-
-gather 适合“等这一组成功完成后，按输入顺序拿到结果”。如果希望先到一份就处理一份，可以使用 `as_completed()`。
-
-完整脚本 `completion_order.py`：
-
-```python
-import asyncio
-
-
-async def prepare(name, delay):
-    await asyncio.sleep(delay)
-    return name, f"{name}已就绪"
-
-
-async def main():
-    tasks = [
-        asyncio.create_task(prepare("A", 0.3)),
-        asyncio.create_task(prepare("B", 0.1)),
-        asyncio.create_task(prepare("C", 0.2)),
-    ]
-    for next_result in asyncio.as_completed(tasks):
-        name, result = await next_result
-        print("先收到：", name, result)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-通常依次收到 B、C、A。循环里虽然一次只 await 一个“下一个结果”，但全部 Task 已提前创建；它没有把工作重新变成串行。
-
-为兼容 Python 3.11，这里采用普通 for 加 await。这个普通迭代接口产出的包装协程不能直接当作原始 Task 的身份标识，所以让工作返回自己的名字，能稳定关联结果与输入。新版本支持的其他迭代方式应按对应版本文档理解。
-
-### 8.2 单个任务失败时，异常会在等待结果处重新出现
-
-完整脚本 `await_error.py`：
-
-```python
-import asyncio
-
-
-async def prepare():
-    await asyncio.sleep(0.05)
-    raise ValueError("资料内容无法解析")
-
-
-async def main():
-    task = asyncio.create_task(prepare())
-    try:
-        await task
-    except ValueError as error:
-        print("调用方处理：", error)
-    print("执行结束：", task.done())
-    print("属于取消：", task.cancelled())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-最后输出 True、False：任务已经结束，但并非被取消，而是执行失败。能拿到 Task 不代表能拿到正常返回值，等待它时必须遵循业务需要处理异常。
-
-只创建任务，从不等待也不检查异常，可能出现 `Task exception was never retrieved`。这说明任务失败没有被所属流程接住，排查时应找任务的创建者与结果接收者。见 [asyncio 开发指南](https://docs.python.org/3.11/library/asyncio-dev.html#detect-never-retrieved-exceptions)。
-
-### 8.3 独立工作允许部分失败：把成功与错误逐项收集
-
-完整脚本 `collect_results.py`：
-
-```python
-import asyncio
-
-
-async def prepare(index):
-    await asyncio.sleep(0.05)
-    if index == 2:
-        raise ValueError("第 2 项内容错误")
-    return f"资料 {index}"
-
-
-async def main():
-    inputs = [1, 2, 3]
-    results = await asyncio.gather(
-        *(prepare(index) for index in inputs),
-        return_exceptions=True,
-    )
-    for index, result in zip(inputs, results):
-        if isinstance(result, BaseException):
-            print(index, "失败", type(result).__name__)
-        else:
-            print(index, "成功", result)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-第 1、3 项成功，第 2 项失败；结果依旧按输入顺序对齐。`return_exceptions=True` 把普通任务失败作为结果元素交回来，调用方不能再把每项都无条件当成字符串。
-
-这里用 `BaseException` 识别结果中的异常对象，是为了也识别取消结果；不是写一个捕获所有退出信号的宽泛 except。外层 gather 自己被取消时，仍会影响未完成的子工作，并不因此变成永远返回一个正常列表。
-
-### 8.4 gather 默认失败行为，不等于取消所有兄弟任务
-
-默认 `gather()` 会把先出现的异常传播给等待者，但不会仅因为一个子任务普通失败就自动取消其他任务。
-
-完整脚本 `gather_failure.py` 用显式等待收尾，避免把事件循环退出混进实验：
-
-```python
-import asyncio
-
-
-async def broken():
-    await asyncio.sleep(0.05)
-    raise ValueError("A 失败")
-
-
-async def slow():
-    await asyncio.sleep(0.15)
-    print("B 正常完成")
-    return "B 的结果"
-
-
-async def main():
-    first = asyncio.create_task(broken())
-    second = asyncio.create_task(slow())
-    try:
-        await asyncio.gather(first, second)
-    except ValueError:
-        print("已经收到 A 的错误")
-    print("继续等 B：", await second)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-先看到 A 的错误，之后 B 正常完成。如果错误没有被捕获，导致 main 直接退出，`asyncio.run()` 的结束清理又可能取消残余任务。这是入口清理行为，不能误认为是 gather 本身的失败策略。
-
-这些收集与异常语义见 [Coroutines and Tasks：Running Tasks Concurrently](https://docs.python.org/3.11/library/asyncio-task.html#running-tasks-concurrently)。
-
-### 8.5 一组相关工作共同收尾：TaskGroup
-
-当同一组工作共同组成一次操作，某项失败后其他结果也失去意义，可以用 TaskGroup 管理范围。
-
-完整脚本 `taskgroup_failure.py`：
-
-```python
-import asyncio
-
-
-async def broken():
-    await asyncio.sleep(0.05)
-    raise ValueError("清单解析失败")
-
-
-async def slow():
-    try:
-        await asyncio.sleep(5)
-        print("慢任务正常完成")
-    finally:
-        print("慢任务清理资源")
-
-
-async def main():
-    try:
-        async with asyncio.TaskGroup() as group:
-            group.create_task(broken())
-            group.create_task(slow())
-    except* ValueError as errors:
-        print("处理本例 ValueError 数量：", len(errors.exceptions))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-约 0.05 秒后，出现慢任务清理与异常数量 1，不应看到慢任务正常完成。普通子任务失败会触发其他任务取消，组等待它们完成清理，然后向外报告异常组。
-
-这里的 async with 是上节的同一种协议：进入组后登记任务，退出组时负责等待和收尾。顺利完成时，离开块以后可以从保存的 Task 取 `.result()`；块内创建完就立刻取结果，则可能尚未完成。
-
-TaskGroup 不会撤销已发生的外部副作用。第一个任务已经写成功的文件或提交的远程操作，不会因为第二个任务失败而自动回滚。
-
-### 8.6 ExceptionGroup 与 except* 为什么需要专门的语法？
-
-普通异常表达一次错误，但并发子任务可能在接近的时间各自失败，或者一个任务失败后，另一个任务清理时又失败。异常组能把多个异常作为一个结构传递。
-
-`except* ValueError` 处理组内匹配 ValueError 的部分，其余未处理类型继续传播。一个异常组可以只有一个异常，不要求必须凑齐两个；TaskGroup 也不保证所有原本可能失败的任务都会运行到失败点，因为有的会提前被取消。
-
-上例中的 `len(errors.exceptions)` 适用于这个只有一层的演示；嵌套异常组可能还有子组，不能总把顶层长度当成全部叶子错误数量。同一个 try 中不能混写普通 except 和 except*。完整语法见 [Python 语言参考：except*](https://docs.python.org/3.11/reference/compound_stmts.html#except-star)。
-
-如果希望所有独立任务都运行完，再一次处理多个失败，可以先用 gather 收集，然后主动构建异常组。这个行为与 TaskGroup 的“某项失败后取消其他项”不同。完整脚本 `collected_exception_group.py`：
-
-```python
-import asyncio
-
-
-async def read_source(index):
-    await asyncio.sleep(0.02 * index)
-    if index == 1:
-        raise ValueError("第一份资料格式错误")
-    raise ConnectionError("第二个来源连接失败")
-
-
-async def main():
-    results = await asyncio.gather(
-        read_source(1), read_source(2), return_exceptions=True
-    )
-    errors = [item for item in results if isinstance(item, Exception)]
-    if errors:
-        raise ExceptionGroup("本批资料失败", errors)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except* ValueError as errors:
-        print("需要修复格式：", len(errors.exceptions))
-    except* ConnectionError as errors:
-        print("需要检查连接：", len(errors.exceptions))
-```
-
-两个处理分支都执行，各报告 1 项。这个实验没有被取消的子任务；因此只提取普通 Exception 来构建 ExceptionGroup。取消继承自 BaseException，不能随意塞进只接受普通 Exception 的组里，也不应默默把取消当成一般业务错误丢弃。实际收集结果时要另行定义取消的传播策略。
-
-### 8.7 使用 TaskGroup 管理队列任务
-
-在 `queue_workers.py` 中，只替换 main，保留 producer、consumer 和 STOP：
-
-```python
-async def main():
-    queue = asyncio.Queue(maxsize=2)
-    results = []
-    worker_count = 2
-    async with asyncio.TaskGroup() as group:
-        for index in range(worker_count):
-            group.create_task(consumer(f"worker-{index}", queue, results))
-        await producer(queue, worker_count)
-        await queue.join()
-    print("结果：", sorted(results))
-```
-
-正常结果不变。现在若某消费者出现未捕获的普通异常，组会取消其余消费者，并中断组体中正在等待的生产或 join 流程，等待清理后抛出异常组，不会把失败工作当成正常完成的一批结果。
-
-练习时在 consumer 的处理分支中临时加入 `if item == 3: raise ValueError("模拟损坏资料")`，观察程序能否结束并报告错误，而不是一直等下去。若业务允许单项失败后继续，应在消费者内部只捕获预期业务异常，记录失败后继续下一项；不要无差别吞掉程序错误。
-
-## 9. 超时、取消与资源清理
-
-### 9.1 取消是一个请求，还需要任务配合收尾
-
-完整脚本 `cancel_task.py`：
-
-```python
-import asyncio
-
-
-async def worker(started):
-    try:
-        print("任务开始")
-        started.set()
-        await asyncio.sleep(10)
-    except asyncio.CancelledError:
-        print("任务收到取消")
-        raise
-    finally:
-        print("任务执行清理")
-
-
-async def main():
-    started = asyncio.Event()
-    task = asyncio.create_task(worker(started))
-    await started.wait()
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        print("调用方确认取消完成")
-    print("已取消：", task.cancelled())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-这里 Event 只用来确保任务确实已经开始，再发取消请求，避免依赖猜测的短暂 sleep。日志依次说明启动、收到取消、清理、调用方确认，最后 True。
-
-`task.cancel()` 不等于工作已经退出，所以调用方还 await task，等待取消完成。`CancelledError` 是取消机制使用的异常，直接继承 `BaseException`，普通 `except Exception` 不会捕获它。
-
-若需要捕获取消做日志或清理，通常应重新抛出；否则任务可能把自己伪装成成功，也可能影响依赖取消实现的 TaskGroup 和 timeout。资源清理可以放在 finally，既覆盖正常退出，也覆盖异常和取消路径。
-
-### 9.2 给一段流程设超时
-
-完整脚本 `timeout_demo.py`：
-
-```python
-import asyncio
-
-
-async def slow_job():
-    try:
-        await asyncio.sleep(10)
-        return "完成"
-    finally:
-        print("清理慢任务")
-
-
-async def main():
-    try:
-        async with asyncio.timeout(0.1):
-            await slow_job()
-    except TimeoutError:
-        print("这一段流程超时")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-约 0.1 秒后先清理，再报告超时。`asyncio.timeout()` 在内部使用取消机制，并在退出上下文时把自己引发的取消转换为 TimeoutError，因此这里在 **async with 外面**捕获它。
-
-如果同一个 timeout 块内先后等待两个操作，预算覆盖整个块，不是每个 await 都重新得到 0.1 秒。若需要每项独立超时，则把 timeout 放到各项工作内部。预算放置位置应与业务含义一致。
-
-### 9.3 wait_for、shield 以及“超时后工作还在不在”
-
-等待单个操作也可以写 `await asyncio.wait_for(operation(), timeout=1)`。超时通常会取消被等待操作，并等待其取消清理，因此实际耗时可能超过名义上的一秒。
-
-`asyncio.shield(task)` 可在特定场景阻止调用者的取消传递给被保护任务，但外层调用者仍会收到取消。它不是一键修复取消错误的工具：用了 shield，仍要保存任务引用，并明确谁负责最终等待和清理。
-
-尤其要注意，事件循环被同步阻塞时，超时处理本身也可能得不到执行机会。它不是一个能在任意 Python 行立刻打断代码的硬性外部计时器。取消请求也不保证远端 HTTP 服务停止了已经开始的业务操作。相关机制见 [Coroutines and Tasks：Timeouts](https://docs.python.org/3.11/library/asyncio-task.html#timeouts)。
-
-## 10. 阻塞、共享状态与并发限制
-
-### 10.1 阻塞函数放进 async def，仍然会挡住整个事件循环
-
-完整脚本 `blocking_demo.py`：
-
-```python
-import asyncio
+import random
 import time
 
 
-def legacy_read():
-    time.sleep(0.3)
-    return "旧函数的结果"
-
-
-async def ticker():
-    for index in range(4):
-        print("心跳", index)
-        await asyncio.sleep(0.1)
-
-
-async def blocking_job():
-    print("直接调用开始")
-    result = legacy_read()
-    print("直接调用结束：", result)
-
-
-async def threaded_job():
-    print("交给线程开始")
-    result = await asyncio.to_thread(legacy_read)
-    print("交给线程结束：", result)
-
-
 async def main():
-    print("第一轮：观察心跳是否停住")
-    await asyncio.gather(ticker(), blocking_job())
-    print("第二轮：观察等待时是否还有心跳")
-    await asyncio.gather(ticker(), threaded_job())
+    user_ids = [1, 2, 3]
+    start = time.perf_counter()
+    await asyncio.gather(
+        *(get_user_with_posts(user_id) for user_id in user_ids)
+    )
+    end = time.perf_counter()
+    print(f"\n==> Total time: {end - start:.2f} seconds")
+
+
+async def get_user_with_posts(user_id):
+    user = await fetch_user(user_id)
+    await fetch_posts(user)
+
+
+async def fetch_user(user_id):
+    delay = random.uniform(0.5, 2.0)
+    print(f"User coro: fetching user by {user_id=}...")
+    await asyncio.sleep(delay)
+    user = {"id": user_id, "name": f"User{user_id}"}
+    print(f"User coro: fetched user with {user_id=} (done in {delay:.1f}s).")
+    return user
+
+
+async def fetch_posts(user):
+    delay = random.uniform(0.5, 2.0)
+    print(f"Post coro: retrieving posts for {user['name']}...")
+    await asyncio.sleep(delay)
+    posts = [f"Post {i} by {user['name']}" for i in range(1, 3)]
+    print(
+        f"Post coro: got {len(posts)} posts by {user['name']} "
+        f"(done in {delay:.1f}s):"
+    )
+    for post in posts:
+        print(f"- {post}")
 
 
 if __name__ == "__main__":
+    random.seed(444)
     asyncio.run(main())
 ```
 
-第一轮中，直接调用开始与结束之间不会出现心跳，因为事件循环所在的线程被 legacy_read 阻塞。第二轮把同步函数放到工作线程执行，事件循环仍能在等待期间安排 ticker。
+在这个例子中，你定义了 `fetch_user()` 和 `fetch_posts()` 两个主要协程。两者都用 `asyncio.sleep()` 加上随机延迟来模拟一次网络调用。
 
-`asyncio.to_thread()` 适合将已有阻塞 I/O 函数接入异步流程。注意传入的是函数 `legacy_read`，不是先调用后的 `legacy_read()`，否则阻塞早已在事件循环线程发生。
+在 `fetch_user()` 协程中，你返回一个模拟的用户[字典](https://realpython.com/python-dicts/)。在 `fetch_posts()` 中，你用这个字典构造并打印归属于当前用户的模拟文章列表；该函数没有显式的 `return`，所以返回值是 `None`。随机延迟用来模拟网络延迟这类真实世界中的异步行为。
 
-线程不是无限资源。大量纯 Python CPU 计算也不应仅靠 to_thread 期待多核加速；更重要的是，取消 await to_thread 的任务，通常不能强行终止已经在线程里开始运行的同步函数。需要让旧函数本身有超时或停止机制。阻塞问题见 [asyncio 开发指南：Running Blocking Code](https://docs.python.org/3.11/library/asyncio-dev.html#running-blocking-code)。
+协程链发生在 `get_user_with_posts()` 里。这个协程等待 `fetch_user()`，并把结果存进 `user` [变量](https://realpython.com/python-variables/)。等用户信息到手后，它被传给 `fetch_posts()`，以异步方式取出文章。
 
-### 10.2 单线程仍然会有竞态：问题出在读写之间的等待
+在 `main()` 中，你用 `asyncio.gather()` 并发运行这些串联起来的协程：按用户 ID 的数量执行相应次数的 `get_user_with_posts()`。
 
-完整脚本 `shared_counter.py`：
+执行该脚本的结果如下：
+
+```shell
+$ python chained.py
+User coro: fetching user by user_id=1...
+User coro: fetching user by user_id=2...
+User coro: fetching user by user_id=3...
+User coro: fetched user with user_id=2 (done in 0.5s).
+Post coro: retrieving posts for User2...
+User coro: fetched user with user_id=1 (done in 1.0s).
+Post coro: retrieving posts for User1...
+User coro: fetched user with user_id=3 (done in 1.2s).
+Post coro: retrieving posts for User3...
+Post coro: got 2 posts by User2 (done in 1.8s):
+- Post 1 by User2
+- Post 2 by User2
+Post coro: got 2 posts by User1 (done in 1.6s):
+- Post 1 by User1
+- Post 2 by User1
+Post coro: got 2 posts by User3 (done in 1.5s):
+- Post 1 by User3
+- Post 2 by User3
+
+==> Total time: 2.68 seconds
+```
+
+输出中的 `user_id=1`、`User2`、`Post 1 by User2` 分别来自 f-string 表达式 `{user_id=}`、`{user['name']}` 与 `{post}` 的插值结果。
+
+如果把所有操作的耗时加总，用同步实现大约需要 7.6 秒；而改用异步实现后，只用了 2.68 秒。
+
+这种“等待一个协程、再把结果传给下一个”的模式构成了**协程链（coroutine chain）**，其中每一步都依赖前一步。这个例子模拟了一种常见的异步工作流：先拿到一份信息，再用它去获取相关联的数据。
+
+### 协程与队列的结合（Coroutine and Queue Integration）
+
+`asyncio` 包提供了若干[类队列的类](https://realpython.com/queue-in-python/#using-asynchronous-queues)，它们的设计与 [`queue`](https://docs.python.org/3/library/queue.html#module-queue) 模块中的[类](https://realpython.com/python-classes/)相似。在前面几个例子中，你还不需要队列结构。在 `chained.py` 里，每个任务由一个协程完成，你再把协程串联起来，让数据一步步传递下去。
+
+另一种做法是使用往[队列](https://realpython.com/ref/glossary/queue/)中添加条目的**生产者（producer）**。每个生产者可以在错开的、随机的、事先无法预知的时刻往队列里放入多个条目。然后，一组**消费者（consumer）**在条目出现时把它们取走，贪婪地处理，不需要等待任何其他信号。
+
+在这种设计中，生产者与消费者之间没有链式依赖。消费者不知道生产者有多少个，反之亦然。
+
+单个生产者或消费者往队列中添加、取出条目所需的时间长短不一。队列充当了一个吞吐通道，让双方无需直接对话就能彼此通信。
+
+下面是 `chained.py` 基于队列的改写版本：
+
+文件名：`queued.py`
 
 ```python
 import asyncio
-
-
-async def run_round(use_lock):
-    count = 0
-    lock = asyncio.Lock()
-
-    async def increment():
-        nonlocal count
-        if use_lock:
-            async with lock:
-                previous = count
-                await asyncio.sleep(0)
-                count = previous + 1
-        else:
-            previous = count
-            await asyncio.sleep(0)
-            count = previous + 1
-
-    await asyncio.gather(*(increment() for _ in range(20)))
-    return count
+import random
+import time
 
 
 async def main():
-    print("未加锁：", await run_round(False))
-    print("加锁：", await run_round(True))
+    queue = asyncio.Queue()
+    user_ids = [1, 2, 3]
+    start = time.perf_counter()
+    await asyncio.gather(
+        producer(queue, user_ids),
+        *(consumer(queue) for _ in user_ids),
+    )
+    end = time.perf_counter()
+    print(f"\n==> Total time: {end - start:.2f} seconds")
+
+
+async def producer(queue, user_ids):
+    async def fetch_user(user_id):
+        delay = random.uniform(0.5, 2.0)
+        print(f"Producer: fetching user by {user_id=}...")
+        await asyncio.sleep(delay)
+        user = {"id": user_id, "name": f"User{user_id}"}
+        print(f"Producer: fetched user with {user_id=} (done in {delay:.1f}s)")
+        await queue.put(user)
+
+    await asyncio.gather(*(fetch_user(uid) for uid in user_ids))
+    for _ in range(len(user_ids)):
+        await queue.put(None)  # 哨兵值，用于通知消费者结束
+
+
+async def consumer(queue):
+    while True:
+        user = await queue.get()
+        if user is None:
+            break
+        delay = random.uniform(0.5, 2.0)
+        print(f"Consumer: retrieving posts for {user['name']}...")
+        await asyncio.sleep(delay)
+        posts = [f"Post {i} by {user['name']}" for i in range(1, 3)]
+        print(
+            f"Consumer: got {len(posts)} posts by {user['name']} "
+            f"(done in {delay:.1f}s):"
+        )
+        for post in posts:
+            print(f"- {post}")
 
 
 if __name__ == "__main__":
+    random.seed(444)
     asyncio.run(main())
 ```
 
-按本例默认调度，未加锁是 1，加锁是 20。`sleep(0)` 特意让出执行机会：多个任务先读到相同的旧值 0，恢复后分别写入 1，因此更新被覆盖。
+在这个例子中，`producer()` 函数异步地获取模拟的用户数据。每个取到的用户字典都被放进一个 `asyncio.Queue` 对象，由它把数据共享给消费者。在把所有用户对象都生产出来之后，生产者插入一个[哨兵值（sentinel value）](https://en.wikipedia.org/wiki/Sentinel_value)——在这个语境下也叫[毒丸（poison pill）](https://realpython.com/queue-in-python/#killing-a-worker-with-the-poison-pill)——给每个消费者，用来表示不会再有数据送来，好让消费者干净地退出。
 
-锁保证同一时间只有一个任务进入这段读、等、写的整体区域，其他任务必须等它退出后再读新值。这里把 await 放在锁中是为了演示保护跨等待的操作；实际若只是一个不含 await 的本地计数递增，通常没有必要这样制造等待或加锁。
+`consumer()` 函数持续从队列中读取。如果读到的是用户字典，它就模拟获取该用户的文章，等待一段随机延迟，然后打印结果；如果读到的是哨兵值，就跳出循环并结束。
 
-锁的代价是让受保护区域按顺序执行，应尽量缩小范围。asyncio 的锁用于同一异步运行环境中的任务协调，不是跨线程锁，也不是跨进程锁。见 [Synchronization Primitives：Lock](https://docs.python.org/3.11/library/asyncio-sync.html#lock)。
+这种解耦让多个消费者可以并发处理用户，即便生产者还在继续生成用户；队列则保证了生产者与消费者之间安全、有序的通信。
 
-### 10.3 使用 Semaphore 限制并发数量
+队列是生产者与消费者之间的通信点，使整个系统具备可扩展性与良好的响应能力。
 
-完整脚本 `limited_concurrency.py`：
+这段代码的实际运行结果如下：
+
+```shell
+$ python queued.py
+Producer: fetching user by user_id=1...
+Producer: fetching user by user_id=2...
+Producer: fetching user by user_id=3...
+Producer: fetched user with user_id=2 (done in 0.5s)
+Consumer: retrieving posts for User2...
+Producer: fetched user with user_id=1 (done in 1.0s)
+Consumer: retrieving posts for User1...
+Producer: fetched user with user_id=3 (done in 1.2s)
+Consumer: retrieving posts for User3...
+Consumer: got 2 posts by User2 (done in 1.8s):
+- Post 1 by User2
+- Post 2 by User2
+Consumer: got 2 posts by User1 (done in 1.6s):
+- Post 1 by User1
+- Post 2 by User1
+Consumer: got 2 posts by User3 (done in 1.5s):
+- Post 1 by User3
+- Post 2 by User3
+
+==> Total time: 2.68 seconds
+```
+
+同样，这段代码只用了 2.68 秒，比同步方案更高效。结果与上一节使用协程链时基本一致。
+
+## Python 中其他的异步 I/O 特性（Other Async I/O Features in Python）
+
+Python 的异步 I/O 特性并不止 `async def` 和 `await` 这两个结构。它还包含其他高级工具，让异步编程更具表达力，也与常规 Python 结构更一致。
+
+下面几节将探索一些强大的异步特性，包括异步循环与推导式、`async with` 语句以及异常组。它们能帮你写出更干净、更易读的异步代码。
+
+### 异步迭代器、循环与推导式（Async Iterators, Loops, and Comprehensions）
+
+除了用 `async` 和 `await` 创建协程之外，Python 还提供了 `async for` 结构，用于遍历一个[**异步迭代器（asynchronous iterator）**](https://realpython.com/ref/glossary/asynchronous-iterator/)。异步迭代器让你可以遍历异步生成的数据。循环运行期间，它会把控制权交还给事件循环，好让其他异步任务得以运行。
+
+**注意：** 想进一步了解异步迭代器，可以看看[《Asynchronous Iterators and Iterables in Python》](https://realpython.com/python-async-iterators/)这篇教程。
+
+这个概念的一个自然延伸是[**异步生成器**](https://realpython.com/ref/glossary/asynchronous-generator/)。下面这个例子生成 2 的幂，并在循环与推导式中使用它们：
 
 ```python
-import asyncio
-
-
-async def main():
-    semaphore = asyncio.Semaphore(2)
-    active = 0
-    peak = 0
-
-    async def prepare(index):
-        nonlocal active, peak
-        async with semaphore:
-            active += 1
-            peak = max(peak, active)
-            try:
-                print("开始", index, "进行中", active)
-                await asyncio.sleep(0.1)
-                return index
-            finally:
-                active -= 1
-
-    results = await asyncio.gather(*(prepare(index) for index in range(5)))
-    print("结果：", results)
-    print("最大同时处理数：", peak)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> import asyncio
+>>> async def powers_of_two(stop=10):
+...     exponent = 0
+...     while exponent < stop:
+...         yield 2**exponent
+...         exponent += 1
+...         await asyncio.sleep(0.2)  # 模拟一些异步工作
+...
+>>> async def main():
+...     g = []
+...     async for i in powers_of_two(5):
+...         g.append(i)
+...     print(g)
+...     f = [j async for j in powers_of_two(5) if not (j // 3 % 5)]
+...     print(f)
+...
+>>> asyncio.run(main())
+[1, 2, 4, 8, 16]
+[1, 2, 16]
 ```
 
-结果是 `[0, 1, 2, 3, 4]`，峰值为 2。进入 async with 时申请名额，离开时归还；异常或取消离开也会执行退出逻辑。
+同步生成器、循环、推导式与它们的异步版本之间有一个关键区别：异步版本并不会天然让迭代变成并发。它们只是允许你在显式使用 `await` 让出控制权时，让事件循环在两次迭代之间去运行其他任务。迭代本身仍然是顺序的；如果还需要并发处理取得的数据，可以另外调度任务，例如使用 `asyncio.gather()`。
 
-Semaphore 限制的是某段代码的同时进入数量，不是每秒请求数。请求极快时，同时只有 2 个，也可能一秒完成很多次。每秒限额需要单独的速率控制策略。
+对于只实现异步迭代协议或异步上下文管理协议的对象，应分别使用 `async for` 或 `async with`；普通的 `for` 或 `with` 无法处理这类对象。
 
-它也不限制任务创建数量：本例仍会为全部 5 项安排工作，只是部分任务等在入口外。几十万项工作要控制排队规模时，更适合固定消费者加有界 Queue。锁用于独占，信号量允许有限多个同时进入，有界队列管理等待处理的工作存量；这三个工具解决的问题各不相同。见 [Semaphore](https://docs.python.org/3.11/library/asyncio-sync.html#semaphore)。
+### 异步 with 语句（Async `with` Statements）
 
-## 11. 从模拟等待走向真实 HTTP 请求
+[`with` 语句](https://realpython.com/python-with-statement/)也有它的[异步](https://realpython.com/ref/glossary/asynchronous-programming/)版本：`async with`。这个结构在异步代码中相当常见，因为许多 [I/O 密集型任务](https://realpython.com/ref/glossary/io-bound-task/)都包含准备与收尾阶段。
 
-### 11.1 使用 aiohttp 发起请求
+举个例子：假设你需要写一个协程来检查某些网站是否在线。为此，你可以使用 [`aiohttp`](https://docs.aiohttp.org/en/stable/index.html)，这是一个第三方库，需要在命令行运行 `python -m pip install aiohttp` 来安装。
 
-此前 prepare 中的 sleep 只是为了看清调度。真实网络请求还涉及连接、状态码、响应体、超时和资源释放，但外层仍然是“安排多个独立工作 → 等待 → 收集结果”。
-
-在学习环境安装：
-
-```bash
-python -m pip install "aiohttp>=3.9,<4"
-```
-
-使用 aiohttp 是因为它提供配合 asyncio 的 HTTP 客户端。不要把同步 `requests.get()` 放在协程里再加一个 await，期待它因此变成异步。
-
-先看一条请求。完整脚本 `one_request.py`：
+下面是一个实现该功能的简短示例：
 
 ```python
-import asyncio
-import aiohttp
-
-
-async def main():
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get("https://example.com") as response:
-            response.raise_for_status()
-            text = await response.text()
-            print("HTTP 状态：", response.status)
-            print("正文字符数：", len(text))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> import asyncio
+>>> import aiohttp
+>>> async def check(url):
+...     async with aiohttp.ClientSession() as session:
+...         async with session.get(url) as response:
+...             print(f"{url}: status -> {response.status}")
+...
+>>> async def main():
+...     websites = [
+...         "https://realpython.com",
+...         "https://pycoders.com",
+...         "https://www.python.org",
+...     ]
+...     await asyncio.gather(*(check(url) for url in websites))
+...
+>>> asyncio.run(main())
+https://www.python.org: status -> 200
+https://pycoders.com: status -> 200
+https://realpython.com: status -> 200
 ```
 
-成功时打印状态码和实际正文长度；公网结果受网络和网站行为影响，不能要求固定字节数。`response.status` 是已经拿到的响应元信息，读取完整正文则可能仍要等待更多数据，所以 `response.text()` 要 await。
+在这个例子中，你用 `aiohttp` 和 `asyncio` 对一组网站并发执行 [HTTP GET](https://realpython.com/api-integration-in-python/#get) 请求。`check()` 协程获取并打印网站的状态码。`async with` 语句确保 `ClientSession` 和每个 HTTP 响应都被正确、异步地管理：它们的开启与关闭都不会阻塞事件循环。
 
-`raise_for_status()` 把 HTTP 错误状态转换为异常；“收到响应”不等于“得到成功业务结果”。即使是 HTTP 200，也还需要检查返回内容是否符合应用预期。
+在这个例子中，使用 `async with` 保证了底层的网络资源——包括连接与套接字——即使在发生错误时也能被正确释放。
 
-### 11.2 两层 async with 分别管理什么？
+最后，`main()` 并发运行各个 `check()` 协程，让你可以并行获取这些 URL，而不必等一个结束再开始下一个。
 
-外层 ClientSession 管理会话、连接池等资源。同一批请求通常共享一个 Session，使连接可以复用；不应为每个 URL 都无条件新建 Session。
+### 其他 asyncio 工具（Other `asyncio` Tools）
 
-内层管理一次响应的生命周期，包括正文读取和离开时的资源释放。若状态检查或读正文失败，正常的异常退出仍会走上下文清理。Session 应在异步运行期间创建，并在所有使用它的任务结束后关闭。
-
-一次 `await response.text()` 会读入完整响应体。对于很大的文件或无限流，应使用分块读取和逐步处理，不能因为是异步 I/O 就忽略内存占用。基础客户端用法见 [aiohttp Client Quickstart](https://docs.aiohttp.org/en/stable/client_quickstart.html)。
-
-### 11.3 一批请求：共享会话、限制并发、逐项记录预期错误
-
-完整脚本 `http_checks.py`：
+除了 `asyncio.run()`，你还用过其他几个包级函数，例如 `asyncio.gather()` 和 `asyncio.get_running_loop()`。你可以用 [`asyncio.create_task()`](https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task) 在运行中的事件循环里调度协程对象。下面在 `main()` 中创建任务，再通过 `asyncio.run(main())` 运行整个程序：
 
 ```python
-import asyncio
-import aiohttp
-
-
-async def check(session, semaphore, url):
-    try:
-        async with semaphore:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                text = await response.text()
-                return {
-                    "url": url,
-                    "ok": True,
-                    "status": response.status,
-                    "characters": len(text),
-                }
-    except (aiohttp.ClientError, TimeoutError) as error:
-        return {
-            "url": url,
-            "ok": False,
-            "error": type(error).__name__,
-        }
-
-
-async def main():
-    urls = ["https://example.com", "https://www.python.org"]
-    semaphore = asyncio.Semaphore(2)
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with asyncio.TaskGroup() as group:
-            tasks = [
-                group.create_task(check(session, semaphore, url))
-                for url in urls
-            ]
-        results = [task.result() for task in tasks]
-    for result in results:
-        print(result)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> import asyncio
+>>> async def coro(numbers):
+...     await asyncio.sleep(min(numbers))
+...     return list(reversed(numbers))
+...
+>>> async def main():
+...     task = asyncio.create_task(coro([3, 2, 1]))
+...     print(f"{type(task) = }")
+...     print(f"{task.done() = }")
+...     return await task
+...
+>>> result = asyncio.run(main())
+type(task) = <class '_asyncio.Task'>
+task.done() = False
+>>> print(f"result: {result}")
+result: [1, 2, 3]
 ```
 
-从外往里读：Session 的范围包住 TaskGroup，组的范围包住所有请求；组退出时任务已经收尾，然后才关闭 Session。结果按 tasks 列表的输入顺序提取，任务完成顺序可以不同。
+这个模式里有一个你需要留意的微妙细节：如果你用 `create_task()` 创建了任务，而 `main()` 返回时它们还没完成，`asyncio.run()` 会在关闭事件循环前取消这些剩余任务。为了确保任务完成，通常应显式等待它们，或使用 `gather()`、`TaskGroup` 等方式管理它们的生命周期。
 
-对可预期的网络和超时错误，check 返回失败记录，其他独立请求继续。若内部写错变量名等未知程序错误没有被捕获，TaskGroup 会把它作为异常处理，而不会悄悄当成“网站访问失败”。本例没有捕获 CancelledError，因此上层取消仍能向下传递。
+`create_task()` 函数把一个协程对象包装成更高级的 [`Task`](https://docs.python.org/3/library/asyncio-task.html#asyncio.Task) 对象，并把它调度到事件循环上在后台并发运行。相比之下，直接等待一个协程会立刻运行它，并暂停调用方的执行，直到被等待的协程结束。
 
-`ClientTimeout(total=10)` 从 aiohttp 请求过程开始计算，不包含进入 semaphore 之前排队等待名额的时间。如果业务定义是“从提交任务算起总共最多十秒”，可以把 `asyncio.timeout(10)` 放在工作函数中、semaphore 外侧。相同的数字放在不同位置，实际限制的时间段不同。
+`gather()` 函数则用于把一组协程整齐地放进一个**未来对象（future object）**。该对象代表一个起初未知、但终将在某个时刻可用的结果占位符，通常就是异步计算的结果。
 
-超时参数还可以区分连接和读取阶段；连接池也有自己的数量上限。整体请求超时、连接超时和读取超时约束不同阶段，应用可以按需要分别设置。见 [aiohttp Client Reference：ClientTimeout](https://docs.aiohttp.org/en/stable/client_reference.html#aiohttp.ClientTimeout)。
-
-### 11.4 重试不是在 except 里无限循环
-
-有些失败可能是暂时的，例如连接中断；有些不是，例如错误 URL、权限失败或响应数据持续不符合约定。重试前要明确错误类型、尝试次数、间隔和总时间预算。
-
-等待重试间隔用 `await asyncio.sleep(...)`，不要用 `time.sleep(...)` 阻塞循环。对于有副作用的请求，还要知道第一次是否可能已经在远端成功；本地超时只说明本地没及时取得结果。不能盲目重发一个可能重复创建订单的操作。
-
-http_checks.py 每个 URL 请求一次。可以为临时连接错误加入有限次数重试，并分别记录单次尝试失败和重试耗尽后的最终失败。
-
-## 12. 综合实验：并发获取、逐项校验、区分三种失败
-
-### 12.1 获取数据与验证字段
-
-下面获取四份课程记录，分别对应合法数据、字段错误、连接失败和超时。获取成功的记录还需要用 Pydantic 检查字段。
-
-数据由本地函数模拟，四种结果可以稳定复现。代码里的等待代表外部 I/O，数据验证仍然是同步的 CPU 工作：小记录可以直接验证，大批复杂计算则需要测量是否会阻塞事件循环。
-
-完整脚本 `validated_fetch.py`，依赖 Pydantic 与标准库：
+如果你等待 `gather()`，并传入多个任务或协程，那么在所有任务正常完成时，你会得到它们的全部结果。`gather()` 的结果将是一个列表，其中按输入顺序给出各个结果：
 
 ```python
-import asyncio
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
-
-class Course(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    title: str = Field(min_length=1)
-    lessons: int = Field(gt=0)
-
-
-async def fetch_raw(index):
-    if index == 4:
-        await asyncio.sleep(10)
-    else:
-        await asyncio.sleep(0.02)
-    if index == 3:
-        raise ConnectionError("模拟无法连接数据源")
-    if index == 2:
-        return {"title": "   ", "lessons": 0}
-    return {"title": "  asyncio 入门  ", "lessons": "12"}
-
-
-async def load_one(index, semaphore):
-    try:
-        async with asyncio.timeout(0.2):
-            async with semaphore:
-                raw = await fetch_raw(index)
-    except TimeoutError:
-        return {"id": index, "ok": False, "stage": "timeout"}
-    except ConnectionError:
-        return {"id": index, "ok": False, "stage": "network"}
-
-    try:
-        course = Course.model_validate(raw)
-    except ValidationError as error:
-        return {
-            "id": index,
-            "ok": False,
-            "stage": "validation",
-            "fields": [list(item["loc"]) for item in error.errors()],
-        }
-
-    return {"id": index, "ok": True, "data": course.model_dump(mode="json")}
-
-
-async def main():
-    semaphore = asyncio.Semaphore(2)
-    async with asyncio.TaskGroup() as group:
-        tasks = [group.create_task(load_one(i, semaphore)) for i in range(1, 5)]
-    for task in tasks:
-        print(task.result())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+>>> import time
+>>> async def main():
+...     task1 = asyncio.create_task(coro([10, 5, 2]))
+...     task2 = asyncio.create_task(coro([3, 2, 1]))
+...     print("Start:", time.strftime("%X"))
+...     result = await asyncio.gather(task1, task2)
+...     print("End:", time.strftime("%X"))
+...     print(f"Both tasks done: {all((task1.done(), task2.done()))}")
+...     return result
+...
+>>> result = asyncio.run(main())
+Start: 14:38:49
+End: 14:38:51
+Both tasks done: True
+>>> print(f"result: {result}")
+result: [[2, 5, 10], [1, 2, 3]]
 ```
 
-预期结果：
+在正常完成的情况下，`gather()` 会等待这一组协程全部出结果，返回列表的顺序与输入顺序一致。需要注意，默认 `return_exceptions=False` 时，第一个异常会立即向等待方传播，其他任务不会因此自动取消；后文将演示如何用 `return_exceptions=True` 收集各个任务的异常。
 
-```text
-{'id': 1, 'ok': True, 'data': {'title': 'asyncio 入门', 'lessons': 12}}
-{'id': 2, 'ok': False, 'stage': 'validation', 'fields': [['title'], ['lessons']]}
-{'id': 3, 'ok': False, 'stage': 'network'}
-{'id': 4, 'ok': False, 'stage': 'timeout'}
+另一种做法是遍历 `asyncio.as_completed()`，按完成顺序获取结果。像下面这样使用普通 `for` 时，每次取得的是一个协程对象，等待它就能得到下一个已完成任务的结果；这个对象不是原始的 `Task`。Python 3.13 起也支持用 `async for` 遍历，传入 Task 或 Future 时可取得原对象。在下面这段代码中，`coro([3, 2, 1])` 的结果会在 `coro([10, 5, 2])` 完成之前就可取到，而在使用 `gather()` 函数时并非如此：
+
+```python
+>>> async def main():
+...     task1 = asyncio.create_task(coro([10, 5, 2]))
+...     task2 = asyncio.create_task(coro([3, 2, 1]))
+...     print("Start:", time.strftime("%X"))
+...     for task in asyncio.as_completed([task1, task2]):
+...         result = await task
+...         print(f"result: {result} completed at {time.strftime('%X')}")
+...     print("End:", time.strftime("%X"))
+...     print(f"Both tasks done: {all((task1.done(), task2.done()))}")
+...
+>>> asyncio.run(main())
+Start: 14:36:36
+result: [1, 2, 3] completed at 14:36:37
+result: [2, 5, 10] completed at 14:36:38
+End: 14:36:38
+Both tasks done: True
 ```
 
-### 12.2 成功、字段错误、连接失败与超时
+在这个例子中，`main()` 用 `asyncio.as_completed()` 取得一系列可等待的协程，并通过 `await` 按任务完成顺序获取结果，因此不必先等较慢的任务完成。
 
-第 1 项等待并发名额，模拟取得字典后，退出 semaphore 归还名额。Pydantic 去掉标题空白，将课时字符串解析为整数，然后导出 JSON 兼容字典。
+结果是：较快的那个任务（`task2`，等待 1 秒）先结束，它的结果也更早打印；而耗时更长的任务（`task1`，等待 2 秒）随后完成并打印。当你需要按任务完成的节奏动态处理它们时，`as_completed()` 很有用，这能提升并发工作流的响应速度。
 
-第 2 项取得数据没有失败，但标题与课时不合规则，所以 stage 是 validation。第 3 项根本没有拿到原始记录，属于 network。第 4 项在给定时间内没有完成获取，属于 timeout。把错误分开，才能决定是提示上游修数据、检查连接，还是调整等待策略。
+### 异步异常处理（Async Exception Handling）
 
-超时放在 semaphore 外，所以从 load_one 开始等待时就计算预算，包括排队。对于前 3 项，这个示例留有足够时间完成短等待；第 4 项长等待触发取消。退出 semaphore 时会归还名额，预期超时被转换成失败记录。
+从 [Python 3.11](https://realpython.com/python311-new-features/) 开始，你可以用 [`ExceptionGroup`](https://realpython.com/python311-exception-groups/) 类来处理可能并发发生的多个互不相关的异常。当多个协程各自可能抛出不同异常时，这一点尤其有用。此外，新的 `except*` 语法能帮你优雅地同时处理多个错误。
 
-验证发生在网络超时块之后，因此这个 0.2 秒预算并不包括后续同步校验。即使把同步校验写进 timeout，也不能保证循环被长计算阻塞时立刻超时；要解决的是执行模型本身。
+下面快速演示在异步代码中如何使用这个类：
 
-### 12.3 为什么使用 TaskGroup，却仍然允许部分失败？
+适用于 Python 3.11+：
 
-因为预期失败已经在 load_one 内转成了结构化结果，TaskGroup 看到的是正常返回。若出现没有被设计为普通业务失败的异常，组仍会取消相关任务并向上传播。
+```python
+>>> import asyncio
+>>> async def coro_a():
+...     await asyncio.sleep(1)
+...     raise ValueError("Error in coro A")
+...
+>>> async def coro_b():
+...     await asyncio.sleep(2)
+...     raise TypeError("Error in coro B")
+...
+>>> async def coro_c():
+...     await asyncio.sleep(0.5)
+...     raise IndexError("Error in coro C")
+...
+>>> async def main():
+...     results = await asyncio.gather(
+...         coro_a(),
+...         coro_b(),
+...         coro_c(),
+...         return_exceptions=True
+...     )
+...     exceptions = [e for e in results if isinstance(e, Exception)]
+...     if exceptions:
+...         raise ExceptionGroup("Errors", exceptions)
+...
+```
 
-这是一种明确策略：可以预计并展示给用户的失败逐项收集，未预期的程序错误不要隐藏。若业务要求任一资料失败就整组失败，调整的是错误处理策略，而不是仅把 gather 改成 TaskGroup 的名字。
+在这个例子中，你有三个协程，分别抛出三种不同类型的[异常](https://realpython.com/python-built-in-exceptions/)。在 `main()` 函数里，你把这几个协程作为参数调用 `gather()`。同时你把 `return_exceptions` 参数设为 `True`，以便在异常发生时把它们捕获下来。
 
-下一步接入真实 HTTP 时，替换 fetch_raw 的实现，并像第 11 节一样传入共享 Session、检查状态、读取 JSON；模型验证的位置和失败分类仍然保留。不要用“HTTP 返回了 200”替代业务数据验证。
+接着，你用列表推导式把这些异常存入一个新列表。如果该列表至少包含一个异常，你就为它们创建一个 `ExceptionGroup`。
 
-## 13. 自测与进一步实践
+要处理这个异常组，可以使用下面的代码：
 
-### 13.1 自测题
+适用于 Python 3.11+：
 
-1. 连续写 `await prepare("A")`、`await prepare("B")`，为什么可能耗时相加？
-2. 先 create_task 两次，再先后 await 两个 Task，为什么可以并发？
-3. await 一个立即返回的协程，是否一定让其他任务运行？
-4. `queue.empty()` 为 True，是否说明消费者都处理完了？
-5. 两个消费者只收到一个 STOP，会发生什么？
-6. 使用 `gather(..., return_exceptions=True)` 后，结果是不是一定全是业务数据？
-7. TaskGroup 某项普通失败后，其他任务的清理在哪里发生？已发生的外部操作是否撤销？
-8. `asyncio.timeout(1)` 能否保证一个同步阻塞函数在一秒内被强行停止？
-9. Semaphore(2) 是否意味着每秒最多两次请求？是否意味着只创建两个 Task？
-10. `async for` 是否自动并发获取所有页？
+```python
+>>> try:
+...     asyncio.run(main())
+... except* ValueError as ve_group:
+...     print(f"[ValueError handled] {ve_group.exceptions}")
+... except* TypeError as te_group:
+...     print(f"[TypeError handled] {te_group.exceptions}")
+... except* IndexError as ie_group:
+...     print(f"[IndexError handled] {ie_group.exceptions}")
+...
+[ValueError handled] (ValueError('Error in coro A'),)
+[TypeError handled] (TypeError('Error in coro B'),)
+[IndexError handled] (IndexError('Error in coro C'),)
+```
 
-<details markdown="1">
-<summary>展开参考答案</summary>
+在这段代码中，你把对 `asyncio.run()` 的调用包在一个 [`try`](https://realpython.com/ref/keywords/try/) 块里。然后，你用 `except*` 语法分别捕获预期的异常。在每一个分支中，你都往屏幕上打印一条错误信息。
 
-1. B 在 A 返回后才创建和开始；事件循环不能提前运行尚未安排的工作。
-2. 两个任务都提前安排，等待 first 的同时 second 也能推进。
-3. 不一定。只有实际挂起才提供该次调度切换机会。
-4. 不说明。取出的项目可能仍在处理；join 等待的是未完成计数归零。
-5. 一个退出，另一个可能永远等待下一项。结束信号应覆盖所有消费者。
-6. 不是，结果可能包含异常对象，需要逐项区分成功与失败。
-7. 组请求取消其余任务，任务在 finally 或上下文退出中清理；组等待收尾再报告异常。外部副作用不会自动回滚。
-8. 不能。阻塞会妨碍事件循环处理超时，线程中的同步工作也不会自动被强制停止。
-9. 两者都不是。信号量限制同时进入受保护区域的数量，不是频率或全部任务数。
-10. 不会。它按异步迭代协议逐项等待，并发必须另外组织。
+## 把异步 I/O 放进实际语境（Async I/O in Context）
 
-</details>
+现在你已经看过了足够多的异步代码，不妨退一步想想：什么时候异步 I/O 才是理想选择？又该如何判断它是否合适，或者是否该换用其他并发模型？
 
-### 13.2 练习
+### 何时该用异步 I/O（When to Use Async I/O）
 
-**第一步：从空文件重做等待实验。** 准备 A、B、C 三项，等待时间设为 0.3、0.1、0.2 秒。分别实现串行、gather、as_completed。记录总耗时、完成顺序、结果列表顺序，并解释三者为何不同。
+对执行阻塞操作的函数——例如标准文件 I/O 或同步网络请求——使用 `async def`，会阻塞整个事件循环，抵消异步 I/O 的好处，还很可能降低程序的效率。只对[非阻塞操作](https://realpython.com/ref/glossary/non-blocking-operation/)使用 `async def` 函数。
 
-**第二步：把一批工作改成有限消费者。** 生产 20 项数据、设置 3 名消费者、队列容量 4。记录处理中的最大数量和队列长度；给某项加入预期业务失败，并选择记录失败后继续。最后再加入一个未预期异常，观察 TaskGroup 是否能让整个程序结束。
+异步 I/O 与多进程之间并不是一场真正的对决。如果你愿意，完全可以[把两种模型结合起来用](https://youtu.be/0kXaLh8Fz3k?t=10m30s)。在实践中，如果你有多个 CPU 密集型任务，多进程才是正确的选择。
 
-**第三步：把校验案例接入真实数据。** 在自己控制的本地服务中准备合法 JSON、字段错误 JSON、错误状态码和慢响应四个入口。先逐个请求，再并发请求，检查每项错误是否落到正确阶段。真实请求先在本地验证，能避免把公网波动误认为程序逻辑问题。
+异步 I/O 与线程之间的较量则更直接。线程并不简单，即便在某些看起来容易实现线程的场景里，它仍可能因为[竞态条件（race condition）](https://realpython.com/python-thread-lock/#race-conditions)和内存占用等问题，带来难以追踪的 bug。
 
-<details markdown="1">
-<summary>完成后用这些条件验收</summary>
+另外，线程的扩展性通常不如异步 I/O，因为线程是一种数量有限的系统资源。在很多机器上创建上千个线程会直接失败，或者拖慢你的代码。相比之下，创建上千个异步 I/O 任务完全可行。
 
-第一步：串行约 0.6 秒，并发约 0.3 秒；gather 结果仍按 A、B、C 排列，as_completed 通常先收到 B、C、A。不要把非常接近的完成时间顺序写成业务依赖。
+当你有多个 I/O 密集型任务、其时间主要耗在阻塞式等待上时，异步 I/O 就能大放异彩，例如：
 
-第二步：最多 3 项由消费者同时处理；最多 4 项留在队列里，二者分别计数。每次成功 get 都对应一次 task_done，结束信号覆盖所有消费者。预期失败有记录，未知错误不会导致 join 永久等待。
+* **网络 I/O**，无论你的程序扮演服务端还是客户端
+* **多用户通信应用**，例如群聊或点对点网络，其中存在大量需要并发等待的网络操作
+* **多个独立的读/写操作**，使用支持异步调用的库，让它们的等待时间重叠；如果访问共享状态，仍需考虑同步与任务生命周期
 
-第三步：连接错误、HTTP 错误、JSON 解析错误、模型验证错误和超时应根据需要分别记录；Session 的生命周期覆盖使用它的全部任务；结果带回输入标识；测试结束后没有未等待协程、未收取异常或未关闭资源警告。
+不用异步 I/O 的最大理由是：`await` 只支持一组特定的对象，这些对象需要定义一组特定的方法。举例来说，如果你想对某种[数据库管理系统（DBMS）](https://en.wikipedia.org/wiki/Database#Database_management_system)做异步读取，就需要找到该 DBMS 支持 `async` 和 `await` 语法的 Python 封装库。
 
-</details>
+### 支持异步 I/O 的库（Libraries Supporting Async I/O）
 
-### 13.3 常见问题排查
+在 Python 中，你会找到不少高质量、支持或构建于 `asyncio` 之上的第三方库与框架，涵盖 Web 服务器、数据库、网络、测试等方向。以下是一些最值得关注的：
 
-| 现象 | 优先检查 |
-| --- | --- |
-| 总时间仍接近各项之和 | 是否在创建下一项之前就 await 了上一项 |
-| 所有任务一起卡住 | 是否调用了同步阻塞库或长 CPU 循环 |
-| 创建了函数调用却没日志 | 是否只创建了协程对象，没有驱动它 |
-| 主流程结束，后台工作没完成 | 谁负责保存和等待这些 Task |
-| 队列程序一直退出不了 | 消费者是否存活，结束信号数量、task_done 配对是否正确 |
-| 一项失败后的行为与预期不同 | 区分 gather、TaskGroup、工作函数内部异常处理与入口清理 |
-| 超时后仍有外部活动 | 检查线程任务、远端副作用、shield 与真正的取消边界 |
-| 网络成功但后续计算失败 | 检查 JSON 解析与模型验证是否缺失 |
+* **Web 框架：**
+  * [FastAPI](https://fastapi.tiangolo.com/)：用于构建 [Web API](https://realpython.com/python-api/) 的现代异步 Web 框架。
+  * [Starlette](https://www.starlette.io/)：轻量级的[异步服务器网关接口（ASGI）](https://en.wikipedia.org/wiki/Asynchronous_Server_Gateway_Interface)框架，用于构建高性能异步 Web 应用。
+  * [Sanic](https://sanic.dev/)：为追求速度而构建、基于 `asyncio` 的异步 Web 框架。
+  * [Quart](https://github.com/pallets/quart)：异步 Web 微框架，API 与 [Flask](https://realpython.com/flask-project/) 相同。
+  * [Tornado](https://github.com/tornadoweb/tornado)：高性能 Web 框架与异步网络库。
+* **ASGI 服务器：**
+  * [uvicorn](https://www.uvicorn.org/)：快速的 ASGI Web 服务器。
+  * [Hypercorn](https://pypi.org/project/Hypercorn/)：支持多种协议与配置选项的 ASGI 服务器。
+* **网络工具：**
+  * [aiohttp](https://docs.aiohttp.org/)：基于 `asyncio` 的 HTTP 客户端与服务器实现。
+  * [HTTPX](https://www.python-httpx.org/)：功能完备的异步与同步 HTTP 客户端。
+  * [websockets](https://websockets.readthedocs.io/)：用 `asyncio` 构建 WebSocket 服务器与客户端的库。
+  * [aiosmtplib](https://aiosmtplib.readthedocs.io/)：用于[发送邮件](https://realpython.com/python-send-email/)的异步 SMTP 客户端。
+* **数据库工具：**
+  * [Databases](https://www.encode.io/databases/)：与 [SQLAlchemy](https://realpython.com/python-sqlite-sqlalchemy/) 核心兼容的异步数据库访问层。
+  * [Tortoise ORM](https://tortoise.github.io/)：轻量级异步对象关系映射器（ORM）。
+  * [Gino](https://python-gino.org/)：构建于 SQLAlchemy 核心之上、面向 [PostgreSQL](https://realpython.com/python-sql-libraries/#postgresql) 的异步 ORM。
+  * [Motor](https://motor.readthedocs.io/)：原文列出的异步 [MongoDB](https://realpython.com/introduction-to-mongodb-and-python/) 驱动。**版本补充（2026-09）**：官方已宣布自 2026-05-14 起弃用 Motor，并推荐迁移到 PyMongo Async。
+* **实用工具库：**
+  * [aiofiles](https://github.com/Tinche/aiofiles)：包装 Python 文件 API，使其可用于 `async` 和 `await`。
+  * [aiocache](https://github.com/aio-libs/aiocache)：支持 [Redis](https://realpython.com/python-redis/) 与 Memcached 的异步缓存库。
+  * [APScheduler](https://github.com/agronholm/apscheduler)：支持异步作业的任务调度器。
+  * [pytest-asyncio](https://pytest-asyncio.readthedocs.io/)：为使用 [pytest](https://realpython.com/pytest-python-testing/) 测试异步函数提供支持。
 
-脚本入口使用 `asyncio.run(main(), debug=True)` 可以开启调试模式，帮助定位阻塞事件循环、未等待协程等问题。排查任务交错执行时，可在日志中记录任务名称和时间。
+这些库与框架能帮你写出高性能的异步 Python 应用。无论你是在构建 Web 服务器、从网络获取数据，还是访问数据库，像这样的 `asyncio` 工具都能让你以极小的开销并发处理大量任务。
 
+## 结语（Conclusion）
 
-## 参考资料
+你已经对 Python 的 `asyncio` 库以及 `async`、`await` 语法有了扎实的理解，也学到了异步编程如何让多个 I/O 密集型任务在单个线程中得到高效管理。
 
-- [Real Python — Python’s asyncio: A Hands-On Walkthrough](https://realpython.com/async-io-python/)
-- [Python 官方文档：Coroutines and Tasks](https://docs.python.org/3.11/library/asyncio-task.html)
-- [aiohttp Client Quickstart](https://docs.aiohttp.org/en/stable/client_quickstart.html)
+一路走来，你探索了并发、并行、线程、多进程与异步 I/O 之间的区别，也动手实践了基于协程、事件循环、协程链和队列并发的示例。此外，你还了解了 `asyncio` 的高级特性，包括异步上下文管理器、异步迭代器、推导式，以及如何借助第三方异步库。
 
-相关笔记：[Pydantic：从第一个模型到完整的数据入口]({% post_url /dev/python/2026-09-09-pydantic-beginner-notes %})。
+在构建可扩展的网络服务器、Web API，或需要执行大量同时发生的 I/O 密集型操作的应用时，掌握 `asyncio` 是必不可少的。
+
+**在本教程中，你学会了如何：**
+
+* **区分**各种并发模型，并判断何时该对 I/O 密集型任务使用 **`asyncio`**
+* 使用 `async def` 与 `await` **编写、运行并串联协程**
+* **管理事件循环**，并用 `asyncio.run()`、`gather()` 和 `create_task()` 调度多个任务
+* 实现**协程链**与**异步队列**这类异步模式，用于生产者–消费者工作流
+* **使用 `async for`、`async with` 等高级异步特性**，并与**第三方异步库**集成
+
+有了这些技能，你就可以着手构建高性能的现代 Python 应用，让它们能够异步处理大量操作。
+
+## 常见问题（Frequently Asked Questions）
+
+现在你已经对 Python 中的 `asyncio` 有了一些实践经验，可以用下面的问答来检验自己的理解，并回顾所学内容。
+
+这些常见问题都围绕本教程中最重要的概念。原文中点击每个问题旁的 *Show/Hide* 开关即可显示答案，下面直接给出对应的问答内容。
+
+**问：什么是 `asyncio`，它有什么用？**
+
+你用 `asyncio` 配合 `async` 和 `await` 关键字来编写并发代码，从而在单个线程中高效管理多个 I/O 密集型任务，而不会阻塞程序。
+
+**问：对 I/O 密集型工作，为什么 `asyncio` 通常比线程性能更好？**
+
+对于 I/O 密集型工作，`asyncio` 通常能带来更好的性能，因为它避免了线程带来的开销与复杂性。它主要通过重叠 I/O 等待并减少线程管理开销来提高并发效率；这不意味着绕过 GIL，也不会让单线程中的 CPU 密集型 Python 代码并行执行。
+
+**问：什么时候该用 `asyncio`？**
+
+当你的程序把大量时间花在等待 I/O 密集型操作上——例如网络请求或文件访问——而你又希望并发、高效地运行许多这类任务时，就该使用 `asyncio`。
+
+**问：如何定义并运行一个协程？**
+
+你用 `async def` 语法定义协程。要运行它，要么把它传给 `asyncio.run()`，要么用 `asyncio.create_task()` 把它调度为一个任务。
+
+**问：事件循环负责做什么？**
+
+你依靠事件循环来管理协程的调度与执行，让每个协程在它等待某个 I/O 密集型操作或该操作完成时都有机会运行。
