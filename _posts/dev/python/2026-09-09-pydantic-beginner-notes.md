@@ -5,32 +5,17 @@ date: 2026-09-09 08:00:00 +0800
 last_modified_at: 2026-09-10
 categories: [Dev, Python]
 tags: [python, pydantic, beginner, learning-notes]
-description: 沿着认识 Pydantic、模型、字段、自定义验证、函数验证和配置管理的路线，用逐步演进的读书计划案例讲透数据验证；包含完整实验、错误分析和练习答案。
+description: Pydantic 的模型、字段约束、序列化、自定义验证、函数参数校验与配置管理，以读书计划为例说明各项规则的用法和边界。
 toc: true
 ---
 
-一份学习笔记应该能回答两个问题：这一段代码为什么要这样写？学完这一段后，为什么自然地需要下一段？如果刚认识 `BaseModel`，就同时看到别名、默认工厂、两种验证器和一批配置参数，即使代码能运行，也很难分清每项功能解决什么问题。
+Pydantic 是 Python 的数据验证库。它根据类型注解解析和检查输入，把字典、JSON 等外部数据转换成模型对象。字段的类型、取值范围和业务规则可以集中定义在模型中，后续代码直接使用验证后的值。
 
-这次我们从一个很小的数据问题出发，逐次增加需求。主线沿着 Real Python 的 [Pydantic: Simplifying Data Validation in Python](https://realpython.com/python-pydantic/) 展开：认识库与安装依赖 → 模型及其输入输出 → 字段定制 → 自定义验证 → 函数调用验证 → 应用配置。下面的“读书计划”案例与练习独立编写；嵌套结构、严格模式、更新边界和整批导入作为补充穿插在需要它们的位置。本文不是原文的逐段翻译。
+**运行环境：Python 3.11+，Pydantic 2.11+ 且小于 3；配置管理使用 pydantic-settings 2.x。** 别名示例中的 `validate_by_name` 和 `validate_by_alias` 需要 Pydantic 2.11+。
 
-**环境约定：Python 3.11+，Pydantic 2.11+ 且小于 3；配置部分使用 pydantic-settings 2.x。** 选择 2.11 作为下限，是因为别名实验使用 `validate_by_name` 和 `validate_by_alias`。前面的大部分基础写法也适用于更早的 v2。
+标注“完整脚本”的示例按文件名保存后即可运行；标注“接着运行”或“替换定义”的片段放入指定脚本。需要互相导入的文件放在同一目录。
 
-系列下一篇：[asyncio 学习笔记]({% post_url /dev/python/2026-09-09-asyncio-beginner-notes %})。
-
-## 阅读与动手方式
-
-| 阶段 | 章节 | 这次只需要解决的问题 |
-| --- | --- | --- |
-| 建立基础 | 1–4 | 原始输入怎样变成模型？模型怎样再变成外部数据？ |
-| 表达规则 | 5–7 | 类型以外的边界、命名和业务关系放在哪里？ |
-| 扩展入口 | 8–9 | 同样的规则怎样用于函数和环境变量？ |
-| 独立实践 | 10–12 | 怎样处理整批数据，并判断自己是否理解了边界？ |
-
-可以分四次学习。每次先自己预测输出，再运行；出错时先定位是“缺字段”“类型不对”“范围不对”，还是“多个字段的关系不对”。这些区分比一次记住所有方法名更有价值。
-
-代码块会明确标为**完整脚本**、**接着运行**或**替换定义**。完整脚本可以独立保存；接着运行的片段放在指定脚本后面。不同阶段的模型使用不同名称，避免在交互窗口里覆盖旧类后，不知道当前到底在测试哪个版本。
-
-## 1. 先遇到问题：有类型提示，为什么数据仍然会错？
+## 1. 为什么需要数据验证？
 
 ### 1.1 外部数据通常没有准备好直接参加运算
 
@@ -40,13 +25,13 @@ toc: true
 raw = {"title": "Python 数据练习", "pages": "180"}
 ```
 
-页数看起来是 180，但引号说明它是字符串。执行 `raw["pages"] - 20` 会产生 `TypeError`。问题不是减法写错了，而是我们把“用户提交的文本”当成了“已经确认可用的整数”。
+页数看起来是 180，但引号说明它是字符串。执行 `raw["pages"] - 20` 会产生 `TypeError`。减法需要数值，而表单提交的页数仍是文本。
 
-最直接的修补是 `int(raw["pages"])`。但接下来会遇到更多情况：字段没传；传了 `"很多"`；传了 `-5`；标题为空；记录嵌套在列表里；其他入口忘记执行转换。逐项写 `if` 可以解决，却需要由我们反复维护转换顺序、错误位置和错误说明。
+可以用 `int(raw["pages"])` 转换，但还需要处理其他输入情况：字段没传；传了 `"很多"`；传了 `-5`；标题为空；记录嵌套在列表里；其他入口忘记执行转换。逐项写 `if` 可以解决，但转换顺序、错误位置和错误说明都需要手动维护。
 
-此时真正需要的是一个明确的数据入口：**先声明什么样的数据能被接受，再统一完成解析与验证，然后让后续业务使用结构清楚的对象。**
+这些检查可以集中在数据入口完成：声明允许的类型与取值，解析并验证输入，再将结果交给业务代码。
 
-### 1.2 类型提示是在描述，普通 Python 不会因此主动检查
+### 1.2 类型提示不会自动执行运行时检查
 
 完整脚本 `type_hints.py`：
 
@@ -83,9 +68,9 @@ TypeError
 
 Pydantic 会读取模型的注解，在创建模型时执行运行时解析与验证。因此，注解仍然是熟悉的 Python 语法，新增的是理解并执行这些规则的库。模型如何利用注解定义结构，见 [官方 Models 文档](https://docs.pydantic.dev/latest/concepts/models/)。
 
-### 1.3 它能保证什么，不能替我们决定什么？
+### 1.3 验证的范围
 
-如果我们只写“页数是整数”，`-5` 就没有违反这条规则。若希望页数为正，需要把正数约束写出来。若希望书名真实存在，则需要另外的数据来源去核实；若希望只有作者能修改记录，则属于权限逻辑。
+如果只声明“页数是整数”，`-5` 就没有违反这条规则。若希望页数为正，需要把正数约束写出来。若希望书名真实存在，则需要另外的数据来源去核实；若希望只有作者能修改记录，则属于权限逻辑。
 
 所以，“验证通过”的意思是数据满足**已经声明且确实执行了的规则**。Pydantic 不会猜测业务需求，也不会自动查数据库、认证用户或保证后续任意修改仍然正确。
 
@@ -97,7 +82,7 @@ Pydantic 会读取模型的注解，在创建模型时执行运行时解析与�
 python -m pip install "pydantic>=2.11,<3"
 ```
 
-`python -m pip` 表示使用这个 Python 对应的 pip，可以减少“装在一个环境、运行在另一个环境”的混淆。版本范围把本篇使用的 API 下限与 v2 大版本固定下来。
+`python -m pip` 表示使用这个 Python 对应的 pip，可以减少“装在一个环境、运行在另一个环境”的混淆。版本范围限定为 2.11 及以上的 v2 版本。
 
 后面校验邮箱时还需要：
 
@@ -115,11 +100,11 @@ python -m pip install "pydantic-settings>=2,<3"
 
 安装时名字是 `pydantic-settings`，导入时模块名是 `pydantic_settings`。Pydantic v2 已把 `BaseSettings` 移到这个独立包中。安装入口可查 [Pydantic Installation](https://docs.pydantic.dev/latest/install/)，迁移差异可查 [Migration Guide](https://docs.pydantic.dev/latest/migration/)。
 
-先完成核心部分即可；直到邮箱或配置章节才需要对应依赖。不要因为暂时缺少邮箱校验依赖，就把 `EmailStr` 改成 `str` 然后以为验证效果相同。
+核心模型只需安装 Pydantic。使用 `EmailStr` 时需要 email 额外依赖；普通 `str` 字段不提供邮箱格式校验。
 
-## 3. 使用模型：先把一条数据从入口走到出口
+## 3. 定义模型与验证输入
 
-### 3.1 第一个模型只做三件事
+### 3.1 定义和创建模型
 
 完整脚本 `plan_v1.py`：
 
@@ -150,13 +135,13 @@ Python 数据练习
 180
 ```
 
-先逐行理解声明。`PlanV1` 继承 `BaseModel`，获得模型创建、验证和导出能力。`title`、`pages`、`completed_pages` 是字段。没有默认值的前两个字段必须提供；第三个字段省略时使用 0。
+模型声明中，`PlanV1` 继承 `BaseModel`，获得模型创建、验证和导出能力。`title`、`pages`、`completed_pages` 是字段。没有默认值的前两个字段必须提供；第三个字段省略时使用 0。
 
 调用 `PlanV1(...)` 时，Pydantic 根据这些声明处理输入。默认的宽松模式接受部分可转换的值，所以字符串 `"180"` 被解析成整数 180。此后使用 `plan.pages` 读取的是模型字段，而不是原始字典的值。
 
-**这里的转换没有把原始变量自动改写。** 我们获得了一个新模型，业务运算开始使用模型中的规范值。第 6 节会讨论什么时候应该禁止这种转换；先看看输入无法转换时会发生什么。
+转换后的值保存在新建的模型中，业务运算使用的是模型字段。原始输入不会因此被自动改写。转换的接受范围可以通过严格模式控制，见第 6 节。
 
-### 3.2 成功案例只能证明一条路径，接下来要故意失败
+### 3.2 输入错误与 ValidationError
 
 新建完整脚本 `plan_errors.py`，与 `plan_v1.py` 放在同一目录：
 
@@ -184,7 +169,7 @@ except ValidationError as error:
 
 这里有三个彼此独立的问题：没有书名、总页数不能解析成整数、已读页数也不能解析成整数。Pydantic 把这些字段错误装进一次 `ValidationError`，让调用方一次看到需要修复的地方。
 
-不要把 `error.errors()` 当成普通字符串。它是错误条目的列表，每项有自己的结构：
+`error.errors()` 返回错误条目的列表，每项有自己的结构：
 
 | 键 | 回答的问题 | 本例如何阅读 |
 | --- | --- | --- |
@@ -196,7 +181,7 @@ except ValidationError as error:
 
 业务需要的是错误定位时，提取 `loc` 和 `type` 比解析整段英文报错稳定。完整结构见 [官方 Error Handling](https://docs.pydantic.dev/latest/errors/errors/)。
 
-再自行试一次 `PlanV1(title="", pages=-5)`：它**会通过**。目前声明只有类型要求，空字符串仍是字符串，负数仍是整数。我们先完成数据的输入输出，再在第 5 节加入业务边界。
+`PlanV1(title="", pages=-5)` **会通过验证**：模型目前只声明了类型，空字符串仍是字符串，负数仍是整数。标题非空和页数为正需要额外的字段约束，见第 5 节。
 
 ### 3.3 构造函数、字典和 JSON 是不同的输入入口
 
@@ -267,7 +252,7 @@ for model in [RequiredNote, NullableNote, DefaultNote]:
 
 ## 4. 模型的出口：Python 字典、JSON 与 Schema
 
-### 4.1 先引入能看出差别的类型
+### 4.1 日期与枚举类型
 
 如果所有字段都只有字符串和整数，容易误以为导出字典与导出 JSON 只是换一种打印格式。加入日期和枚举后，区别就明显了。
 
@@ -326,7 +311,7 @@ True
 
 `date` 是 Python 的日期类型。把字符串解析成日期后，程序就能访问 `.year` 或做日期运算，并且 `"2026-02-30"` 这样的不存在的日期会失败。枚举则把状态限定为三个选项；输入 `"almost_done"` 无法对应其中任何一个成员。
 
-### 4.2 三种导出，各自为谁准备？
+### 4.2 三种导出格式
 
 `model_dump()` 为 Python 程序提供字典，日期等值可以保留为 Python 对象。`model_dump(mode="json")` 仍然返回字典，但字段值转成 JSON 能表达的形式。`model_dump_json()` 直接返回 JSON 字符串。
 
@@ -356,11 +341,9 @@ print(schema["$defs"]["ReadingState"]["enum"])
 
 这里应该看到必填字段包含 `title`、`pages`、`starts_on`；日期字段带有 `format: date`；状态定义包含三个枚举值。`state` 有默认值，因此不在必填列表里。
 
-一条 JSON 记录回答“这次传了哪些值”，Schema 回答“这种记录应该具有怎样的结构”。接口文档生成器可以利用 Schema 展示字段、类型、必填性和说明，其他工具也可以用它构建校验或表单。
+JSON 记录保存具体的字段值，Schema 描述记录应具有的结构与约束。接口文档生成器可以利用 Schema 展示字段、类型、必填性和说明，其他工具也可以用它构建校验或表单。
 
 不过，第 7 节中用任意 Python 代码写出的跨字段规则，不会因此自动获得等价的跨语言实现。Schema 可表达的约束与 Python 函数的表达能力不同；不同 Schema 校验器对 `format` 的执行方式也需要单独确认。见 [官方 JSON Schema](https://docs.pydantic.dev/latest/concepts/json_schema/)。
-
-到这里，我们已经能完整处理“一条数据进来、一个模型出去”。下一步才开始问：哪些值虽然类型正确，却不应该通过？
 
 ## 5. 使用 Field：逐条把业务要求写进字段
 
@@ -475,7 +458,7 @@ except ValidationError as error:
 
 这意味着：希望某个字段验证器处理默认值时，也需要考虑是否启用了默认值验证。`BaseSettings` 的默认值行为有所不同，不能把普通 `BaseModel` 的结论无条件套过去。
 
-### 5.4 字段别名：先分清输入、内部属性、输出三个名字
+### 5.4 字段别名：输入名、属性名与输出名
 
 外部表单把书名称作 `bookTitle`，Python 内部希望使用 `title`。完整脚本 `field_alias.py`：
 
@@ -548,7 +531,7 @@ except ValidationError as error:
 
 元数据同样要区分职责：`Field(description="总页数必须为正")` 只是描述；真正实现正数规则的是 `gt=0`。把这句话写进描述，可以让文档清楚，但不能替代约束。
 
-### 5.6 格式约束与文档元数据：让代码和说明各自可检查
+### 5.6 格式约束与文档元数据
 
 如果书籍编号必须形如 `BK-001`，可以用 `pattern` 描述格式。完整脚本 `field_pattern.py`：
 
@@ -578,11 +561,11 @@ print(BookCode.model_json_schema()["properties"]["code"])
 
 最后打印的 Schema 属性同时包含格式规则、标题、描述和示例。格式规则执行验证，后面三项帮助工具和读者理解这个字段。把 examples 改成另一个编号不会改变输入接受范围；把 description 写成“编号必须唯一”也不会自动查重。
 
-从这个例子再回看第 4 节，Schema 不再是凭空生成的一大段字典，而是字段类型、约束和元数据的一种外部表达。
+生成的 Schema 包含字段类型、格式约束和元数据，可供接口文档与其他工具使用。
 
 ## 6. 模型变复杂后：控制转换、额外字段与嵌套数据
 
-### 6.1 宽松与严格：接受数字文本是需求，拒绝它也可能是需求
+### 6.1 宽松模式与严格模式
 
 完整脚本 `strict_pages.py`：
 
@@ -695,9 +678,9 @@ except ValidationError as error:
 
 ## 7. 自定义验证：类型和 Field 表达不完的部分
 
-### 7.1 先处理一个字段：标题不能只是占位词
+### 7.1 字段验证器：检查标题
 
-我们已有长度约束，现在新增“去掉首尾空白后，标题不能为‘待定’”。完整脚本 `title_validator.py`：
+标题除满足长度约束外，还需要去掉首尾空白，并拒绝“待定”这样的占位词。完整脚本 `title_validator.py`：
 
 ```python
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -724,7 +707,7 @@ for title in ["  数据校验  ", "   ", " 待定 "]:
 
 输出为 `数据校验`、`string_too_short`、`value_error`。
 
-这次的执行顺序值得慢慢读：输入先按字符串规则处理，并剥离两端空白；内建长度检查拒绝空串；通过后，`mode="after"` 的字段验证器得到字符串；自定义规则再拒绝占位词。第二项在长度检查时已经失败，不需要进入后面的成功路径。
+验证按以下顺序执行：输入先按字符串规则处理，并剥离两端空白；内建长度检查拒绝空串；通过后，`mode="after"` 的字段验证器得到字符串；自定义规则再拒绝占位词。第二项在长度检查时已经失败，不需要进入后面的成功路径。
 
 `@field_validator("title")` 把方法登记到指定字段。`@classmethod` 表明它是类方法，首参数 `cls` 是模型类，此时还不需要一个已经完整创建好的实例。
 
@@ -734,7 +717,7 @@ for title in ["  数据校验  ", "   ", " 待定 "]:
 
 ### 7.2 before 与 after：拿到的值处于不同阶段
 
-导入模板可能把页数写成 `" 180 页 "`。整数解析器本来不接受中文单位，我们可以先移除明确允许的后缀，再让正常整数校验继续负责。
+导入模板可能把页数写成 `" 180 页 "`。整数解析器本来不接受中文单位，可以先移除明确允许的后缀，再让正常整数校验继续负责。
 
 完整脚本 `validator_pipeline.py`：
 
@@ -782,11 +765,11 @@ before 参数标成 `Any`，因为输入也可能是整数、列表或其他对�
 
 这里把上限放进 after 是为了观察执行顺序。实际只需要数值上限时，`Field(le=5000)` 更清楚。验证器应该填补内建规则表达不了的部分。
 
-### 7.3 plain 与 wrap 有什么不同，为什么暂时不用它们？
+### 7.3 plain、wrap 与验证顺序
 
 它们并不是 before/after 的更高级替代名。`plain` 会截断通常的内部验证流程，如果返回了不合类型的值，也可能被当作字段结果。`wrap` 会拿到一个 handler，允许你在调用正常验证前后插入处理，甚至选择不调用它。
 
-对于本篇这些需求，before/after 已足够，而且容易解释每一步由谁负责。将来需要捕获内部校验错误并转换特定输入时，再研究 wrap。理解它能接管流程，也就能理解为什么随意使用会削弱类型保证。
+清理页数后缀可以用 before，检查解析后的值可以用 after。需要捕获内部校验错误并按错误类型处理输入时，可以使用 wrap；如果跳过 handler，正常的类型与约束检查也会被跳过。
 
 多个验证器组合还存在顺序规则。特别是 `Annotated` 中 before/wrap 从右向左、after 从左向右执行；不要把一个简单实验的顺序推广到所有组合。可查 [Validators：Ordering of validators](https://docs.pydantic.dev/latest/concepts/validators/#ordering-of-validators)。
 
@@ -820,13 +803,13 @@ for completed in [0, 100, 101]:
 
 输出剩余 100、剩余 0，最后是模型级错误 `()` 与“已读页数不能超过总页数”。
 
-这次方法拿到的是 `self`，即字段验证通过后的实例，所以可以同时比较两个字段。`Self` 是返回当前类实例的类型注解，Python 3.11 起可从 `typing` 导入。成功要返回 `self`。
+模型验证器拿到的是 `self`，即字段验证通过后的实例，所以可以同时比较两个字段。`Self` 是返回当前类实例的类型注解，Python 3.11 起可从 `typing` 导入。成功要返回 `self`。
 
 如果把 `pages` 改为 `"很多"`，字段本身先失败，after 模型验证器不会拿着一个正常实例继续比较。先检查单字段能否成立，再检查字段关系，这就是两层验证的分工。
 
 字段验证器也可以通过 `ValidationInfo.data` 访问先前已经验证的其他字段，但会受到声明顺序和前面字段是否成功的影响。跨字段不变量放进 after 模型验证器，通常更容易读，也避免依赖偶然的字段顺序。
 
-### 7.5 日期关系：选择稳定的输入，让边界容易复现
+### 7.5 检查开始日期与结束日期
 
 完整脚本 `reading_window.py`：
 
@@ -890,9 +873,9 @@ for address in ["learner@example.com", "not-an-email", "learner@example.org"]:
 
 `EmailStr` 并不会替你发送验证邮件或证明收件箱归当前用户所有。格式规范、域名业务规则、账号所有权是不同问题。网络相关类型的行为见 [Network Types](https://docs.pydantic.dev/latest/api/networks/)。
 
-### 7.7 把前面学过的部分合成模型，再讨论修改
+### 7.7 完整模型与更新验证
 
-完整脚本 `reading_plan.py`。这次出现的规则都已经分别实验过：
+下面的模型包含独立 ID、标题清理、页数约束和阅读进度检查。完整脚本 `reading_plan.py`：
 
 ```python
 from typing import Self
@@ -953,7 +936,7 @@ except ValidationError:
 
 ## 8. 验证普通函数：把数据规则放到调用边界
 
-### 8.1 不是每次都需要先定义一条长期存在的记录
+### 8.1 使用 validate_call 验证参数
 
 读书计划需要保存和导出，使用模型合适。但“根据每天学习时间计算每周总分钟数”是一个函数调用，参数验证可以直接写在函数入口。
 
@@ -1019,7 +1002,7 @@ except ValidationError:
 
 ### 9.1 环境变量中的数字通常先是文本
 
-本地运行希望并发数是 2，服务器可能是 8。这些运行参数适合由部署环境提供。若直接使用 `os.environ.get("STUDY_CONCURRENCY")`，得到的通常是字符串或 `None`，我们仍然要处理转换、默认值和范围。
+本地运行希望并发数是 2，服务器可能是 8。这些运行参数适合由部署环境提供。若直接使用 `os.environ.get("STUDY_CONCURRENCY")`，得到的通常是字符串或 `None`，仍需处理类型转换、默认值和取值范围。
 
 `BaseSettings` 把不同来源的配置收集起来，再应用模型规则。先不考虑 `.env`，只看一个小模型。安装配置包后，运行完整脚本 `settings_basic.py`：
 
@@ -1046,7 +1029,7 @@ if __name__ == "__main__":
 STUDY_DAILY_MINUTES=45 STUDY_DEBUG=true python settings_basic.py
 ```
 
-这次分钟数是整数 45，debug 是布尔值 True。`env_prefix="STUDY_"` 把字段名对应到带前缀的环境变量，默认匹配不区分大小写。
+输出中的分钟数是整数 45，debug 是布尔值 True。`env_prefix="STUDY_"` 把字段名对应到带前缀的环境变量，默认匹配不区分大小写。
 
 接着分别改成 `STUDY_DAILY_MINUTES=oops` 和 `STUDY_CONCURRENCY=0`。前者无法解析，后者类型能成立但不满足范围。失败发生在创建 settings 对象时，程序还没有开始用坏配置安排工作。
 
@@ -1098,7 +1081,7 @@ STUDY_DEBUG=false
 构造函数显式参数 > 进程环境变量 > .env > secrets 目录 > 字段默认值
 ```
 
-用一个可重复的小实验理解“优先级”比背箭头有效。在 `settings_file.py` 后面接上：
+在 `settings_file.py` 后面加一行显式传入参数的调用，对比配置来源的优先级：
 
 ```python
 print("显式传入：", FileSettings(daily_minutes=50).daily_minutes)
@@ -1113,7 +1096,7 @@ print("显式传入：", FileSettings(daily_minutes=50).daily_minutes)
 
 来源优先级决定选哪个输入，验证决定该输入是否允许。二者是连续步骤，不是“高优先级错了就悄悄找低优先级补救”。这组来源规则见 [Settings Management：Field value priority](https://docs.pydantic.dev/latest/concepts/pydantic_settings/#field-value-priority)。
 
-### 9.4 大小写与多余配置：查错时不要只看字段类型
+### 9.4 大小写与多余配置
 
 在当前 `.env` 中加入 `STUDY_UNKNOWN=1`，`extra="forbid"` 会把未知项报告为错误。这并不表示系统环境里不能有 `PATH` 等其他变量；环境来源只提取相关变量，而 dotenv 来源对额外项有自己的处理方式。
 
@@ -1174,7 +1157,7 @@ if __name__ == "__main__":
 
 错误输出只取需要的字段，不直接把整个 `error.errors()` 交给 `json.dumps()`，因为上下文可能含异常对象等不能直接编码的值，也可能包含没必要展示的原始输入。
 
-### 10.2 整批验证：这是另一种策略，不能和逐行接受混为一谈
+### 10.2 使用 TypeAdapter 验证整批数据
 
 完整脚本 `whole_batch.py`，放在 `reading_plan.py` 同目录：
 
@@ -1195,9 +1178,9 @@ except ValidationError as error:
 
 输出 `(1, 'pages')`，表示整个列表中第二条记录的页数字段失败。`TypeAdapter` 让 `list[ReadingPlan]` 这样的类型表达式直接成为验证目标，不必为了列表再造一个只有单字段的模型。见 [官方 Type Adapter](https://docs.pydantic.dev/latest/concepts/type_adapter/)。
 
-这次没有得到一个正常返回的完整列表。应用可以因此决定整批拒绝；上一种函数则主动保留成功项。**Pydantic 提供验证机制，部分成功还是全部成功由应用选择。** 即便整批验证通过，也不等于数据库写入自动具有事务性。
+整批验证抛出异常，没有返回完整列表。应用可以因此决定整批拒绝；上一种函数则主动保留成功项。**Pydantic 提供验证机制，部分成功还是全部成功由应用选择。** 即便整批验证通过，也不等于数据库写入自动具有事务性。
 
-## 11. 自测：先写预测，再看答案
+## 11. 自测
 
 先不运行，写下每题会在哪里失败、或为什么通过：
 
@@ -1228,7 +1211,7 @@ except ValidationError as error:
 
 </details>
 
-## 12. 独立作业：不复制综合模型，重新建立一次数据入口
+## 12. 练习：课程学习计划
 
 把场景改成课程学习计划，声明 `course_name`、`total_lessons`、`completed_lessons` 和可省略的备注。先只写类型与默认值，完成一次成功输入和一次类型失败；然后加范围；最后才加“已学课时不能超过总课时”。
 
@@ -1243,4 +1226,10 @@ JSON 往返后比较字段是否一致；Schema 中检查哪些字段必填。�
 
 </details>
 
-下一篇 [asyncio 学习笔记]({% post_url /dev/python/2026-09-09-asyncio-beginner-notes %}) 会把问题推进到另一个方向：当这些原始记录需要等待多个来源返回时，如何组织并发、等待结果并处理失败。
+相关笔记：[asyncio：从一次等待到有序管理并发任务]({% post_url /dev/python/2026-09-09-asyncio-beginner-notes %})。
+
+## 参考资料
+
+- [Real Python — Pydantic: Simplifying Data Validation in Python](https://realpython.com/python-pydantic/)
+- [Pydantic 官方文档](https://docs.pydantic.dev/latest/concepts/models/)
+- [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
